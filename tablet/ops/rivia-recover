@@ -1,0 +1,10 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ~/bin/rivia-recover: bring back sshd and RIVIA (server, tunnel, watchdog) inside Termux.
+# Run by the root supervisor (/data/adb/service.d/rivia-supervisor.sh) through Termux's
+# RUN_COMMAND service after Android kills Termux, or by hand. Safe to re-run.
+mkdir -p "$HOME/rivia/logs"
+exec >> "$HOME/rivia/logs/recover.log" 2>&1
+echo "$(date '+%F %T') recover"
+termux-wake-lock 2>/dev/null
+pgrep -x sshd > /dev/null || { sshd && echo "sshd: started"; }
+bash "$HOME/storage/shared/rivia/rivia.sh" start
