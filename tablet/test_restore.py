@@ -1,4 +1,4 @@
-"""Step 5: rivia sched restore and rivia sched rides.
+"""Step 5: rivia sched start-fresh, restore, and rides.
 Throwaway RIVIA_DIR; never touches ~/rivia or ~/.rivia.
     python test_restore.py
 """
@@ -138,6 +138,52 @@ ok(bad_payload["ok"] is False and bad_payload["error"]["code"] == "bad_copy",
 usage = sh_sched("restore")
 ok(usage.returncode != 0 and "usage:" in (usage.stderr or "").lower(),
    "rivia sched restore without a file prints usage")
+
+# ── start-fresh (init-db): unlocks a new empty database; a second run is a no-op ──
+os.remove(rp.db_file())
+ok(sched.cmd_rides()["fresh"] is True, "a wiped database is marked fresh again")
+fresh = sched.cmd_start_fresh()
+ok(fresh["ok"] is True and fresh["initialized"] is True
+   and fresh["rides"] == 0 and fresh["fresh"] is False,
+   "start-fresh on a new database unlocks it and leaves 0 rides")
+got = sched.cmd_rides()
+ok(got["ok"] is True and got["rides"] == 0 and got["fresh"] is False,
+   "after start-fresh, rides is 0 and fresh is false")
+cli_sf = sh_sched("rides")
+ok(cli_sf.returncode == 0, "rivia sched rides exits 0 after start-fresh")
+cli_payload = json.loads(cli_sf.stdout)
+ok(cli_payload["rides"] == 0 and cli_payload["fresh"] is False,
+   "rivia sched rides shows rides: 0, fresh: false after start-fresh")
+
+again_sf = sched.cmd_start_fresh()
+ok(again_sf["initialized"] is False and again_sf["rides"] == 0
+   and again_sf["fresh"] is False
+   and "not a new database" in (again_sf.get("note") or "").lower()
+   and "nothing changed" in (again_sf.get("note") or "").lower(),
+   "start-fresh again says not a new database; nothing changed")
+cli_again = sh_sched("start-fresh")
+ok(cli_again.returncode == 0, "rivia sched start-fresh exits 0")
+cli_again_out = json.loads(cli_again.stdout)
+ok(cli_again_out["initialized"] is False
+   and "not a new database" in (cli_again_out.get("note") or "").lower()
+   and "nothing changed" in (cli_again_out.get("note") or "").lower(),
+   "rivia sched start-fresh again reports the no-op note")
+
+# Restoring an empty JSON copy adds 0 rides and drops none (including a tablet-only ride)
+empty_json = os.path.join(TMP, "empty-copy.json")
+with open(empty_json, "w") as f:
+    json.dump({"rides": []}, f)
+empty0 = sched.cmd_restore_file(empty_json)
+ok(empty0["ok"] is True and empty0["added"] == 0 and empty0["in_copy"] == 0
+   and empty0["rides_before"] == 0 and empty0["rides"] == 0,
+   "restoring an empty JSON copy onto a fresh start adds 0 rides")
+local = rp.cmd_log_ride(ride("keep-me", start="2026-11-22T09:00:00-05:00", minutes=18))
+ok(local["stored"] is True, "a ride can be logged after start-fresh")
+ok(sched.cmd_rides()["rides"] == 1, "live database has the one local ride")
+empty1 = sched.cmd_restore_file(empty_json)
+ok(empty1["added"] == 0 and empty1["in_copy"] == 0
+   and empty1["rides_before"] == 1 and empty1["rides"] == 1,
+   "restoring an empty JSON copy adds 0 rides and drops none")
 
 # Did not touch the box home database
 home_db = os.path.expanduser("/home/box/rivia/scheduler.db")

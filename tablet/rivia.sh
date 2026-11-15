@@ -16,6 +16,7 @@
 #   rivia sched events <day>  print primary-calendar events (today, tomorrow, weekday, or YYYY-MM-DD)
 #   rivia sched signin-check  check Google sign-in now (same check as the 05:30 ET timer)
 #   rivia sched settings [day]  print schedule settings (and the 17/15 seed if it has run)
+#   rivia sched start-fresh    unlock a new, empty scheduler.db (init-db); a second run is a no-op
 #   rivia sched rides          ride count in scheduler.db
 #   rivia sched restore <file>  merge rides from a Drive copy (scheduler.db or scheduler.json); never drops any
 #   rivia logs      last lines of the server and tunnel logs
@@ -195,7 +196,11 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py restore "$2"
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | settings [day] | settings-log | rides | restore <file>' ;;
+        start-fresh)
+            sched_code_and_python
+            "$py" rivia_sched.py start-fresh
+            ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | settings [day] | settings-log | rides | restore <file> | start-fresh' ;;
     esac
 }
 
@@ -274,5 +279,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

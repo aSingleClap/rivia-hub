@@ -1149,15 +1149,30 @@ def cmd_restore_file(path):
     return out
 
 
+def cmd_start_fresh():
+    """Clear the planner's fresh-database guard (init-db). Termux only; no door or tool.
+
+    On a new, empty database this unlocks log_ride and backup. On a database
+    that is already in use it is a no-op and does not drop rides.
+    """
+    out = rp.cmd_init_db({})
+    rides = cmd_rides()
+    out["ok"] = True
+    out["rides"] = rides["rides"]
+    out["fresh"] = rides["fresh"]
+    return out
+
+
 def main(argv=None):
     import sys as _sys
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log | rides | restore <file>")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh")
         return 2
     try:
-        # restore / rides are Termux recovery commands; they must work even if selftest failed.
+        # restore / rides / start-fresh are Termux recovery commands; they must
+        # work even if selftest failed.
         if cmd == "rides":
             print(json.dumps(cmd_rides(), indent=1))
             return 0
@@ -1166,6 +1181,10 @@ def main(argv=None):
                 print("usage: rivia sched restore <file>", file=_sys.stderr)
                 return 2
             out = cmd_restore_file(argv[1])
+            print(json.dumps(out, indent=1))
+            return 0
+        if cmd == "start-fresh":
+            out = cmd_start_fresh()
             print(json.dumps(out, indent=1))
             return 0
         if not selftest_ok():
@@ -1188,7 +1207,7 @@ def main(argv=None):
             finally:
                 con.close()
             return 0
-        print("unknown command: %s (use settings, settings-log, rides, or restore <file>)" % cmd, file=_sys.stderr)
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, or start-fresh)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))
