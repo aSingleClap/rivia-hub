@@ -4,3 +4,26 @@ node_modules/
 .env
 dist/
 .DS_Store
+
+# Secrets, credentials, local data (never commit)
+.env*
+*.env
+*.db
+*.sqlite
+*.sqlite3
+*token*
+*.pem
+*.key
+secrets/
+logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+
+# Termux / home data dirs (~/rivia, ~/.rivia) must never be committed
+.rivia/
+**/.rivia/
+**/rivia/.env
+**/rivia/*.db
+**/rivia/logs/
