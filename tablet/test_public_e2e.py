@@ -7,6 +7,7 @@ import asyncio, base64, hashlib, os, secrets, socket, sys, tempfile, threading, 
 _salt = secrets.token_bytes(16)
 _tmp = tempfile.mkdtemp()
 os.environ.update(RIVIA_DIR=os.path.join(_tmp, "rivia"),
+                  RIVIA_DOTDIR=_tmp,
                   RIVIA_DB=os.path.join(_tmp, "e2e.db"),
                   RIVIA_ISSUER="https://mcp.rivia.observer",
                   RIVIA_JWT_KEY=secrets.token_hex(32),

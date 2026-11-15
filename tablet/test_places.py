@@ -111,6 +111,9 @@ ok(refused is not None and refused.code == "inconsistent",
    "a pin closer than 300 m is refused")
 ok("gym" in str(refused) and "300" in str(refused),
    "the refusal names the other pin and the 300 m minimum")
+_gap = rp.meters_between(PINS["gym"], TOO_CLOSE)
+ok("%.1f" % _gap in str(refused),
+   "the measured pin distance is shown to one decimal, not rounded to a whole metre")
 ok(json.load(open(path)) == before, "a refused pin does not rewrite places.json")
 ok(sched.cmd_call("app_places", "{}")["data"]["places"]
    and {p["id"]: (p["lat"], p["lng"]) for p in sched.places_sync()["places"]}["hmc"]

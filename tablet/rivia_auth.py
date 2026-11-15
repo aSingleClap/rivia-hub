@@ -41,13 +41,16 @@ Kill switch:
   python rivia_auth.py revoke-all
 See what clients tried to register (and which redirects were refused):
   python rivia_auth.py registrations
-Token for the Rivia app (no browser sign-in; replaces the previous app token):
-  python rivia_auth.py mint-app-token [days]
-The app's token works only on /app/...; bot tokens work everywhere else.
+Tokens (no browser sign-in):
+  python rivia_auth.py mint-token app [days]     # also: mint-app-token [days]
+  python rivia_auth.py mint-token admin [days]   # 7 days default; saved under ~/.rivia, never printed
+  python rivia_auth.py revoke-all                # voids every token, including the stored admin token
+The app token works only on /app/...; the admin token only on /admin/...; bot tokens only the rest.
 """
 import base64
 import hashlib
 import hmac
+import tempfile
 import html
 import json
 import os
@@ -111,15 +114,114 @@ if os.environ.get("RIVIA_ALLOW_GROK_WEB", "1") != "1":
 
 OPEN_PREFIXES = ("/.well-known/", "/authorize", "/token", "/register", "/health")
 APP_CLIENT = "rivia-app"  # the Rivia app's client id; it never uses the OAuth flow
+ADMIN_CLIENT = "rivia-admin"
 APP_PREFIX = "/app/"
+ADMIN_PREFIX = "/admin/"
+# A token whose client_id is in this table opens only its own prefix.
+# Every other token (bots) opens only the rest — never /app/ or /admin/.
+DOORS = {APP_CLIENT: APP_PREFIX, ADMIN_CLIENT: ADMIN_PREFIX}
+ADMIN_TOKEN_DAYS = 7
+APP_TOKEN_DAYS = 365
 # Browser origins allowed to call this server (CORS). Exact origins, comma-separated,
-# e.g. RIVIA_CORS_ORIGINS="https://console.rivia.observer". Empty = CORS off.
-# "*" and "null" are dropped on purpose: either would let any page (or any
-# sandboxed frame) read replies from this server.
-CORS_ORIGINS = [o for o in (x.strip().rstrip("/") for x in
-                            os.environ.get("RIVIA_CORS_ORIGINS", "").split(","))
-                if o and o not in ("*", "null")]
+# scheme + host + optional port, no path. Put only the Server Hub origin here, e.g.
+# RIVIA_CORS_ORIGINS="https://console.rivia.observer". Empty = CORS off (the hub
+# cannot call /admin/mcp from a browser until this is set). "*" and "null" are
+# dropped on purpose: either would let any page (or any sandboxed frame) read
+# replies from this server.
 CORS_HEADERS = ["authorization", "content-type", "mcp-session-id", "mcp-protocol-version"]
+
+
+def cors_origins():
+    """Exact origins from RIVIA_CORS_ORIGINS, dropping '*' and 'null'."""
+    return [o for o in (x.strip().rstrip("/") for x in
+                        os.environ.get("RIVIA_CORS_ORIGINS", "").split(","))
+            if o and o not in ("*", "null") and o.lower() != "null"]
+
+
+def dot_dir():
+    return os.environ.get("RIVIA_DOTDIR") or os.path.expanduser("~/.rivia")
+
+
+def admin_token_path():
+    return os.environ.get("RIVIA_ADMIN_TOKEN_PATH") or os.path.join(dot_dir(), "admin_token")
+
+
+def _sha256(s: str) -> bytes:
+    return hashlib.sha256((s or "").encode()).digest()
+
+
+def tokens_equal(a, b) -> bool:
+    """Constant-time compare for bearer / stored tokens (equal-length SHA-256 digests)."""
+    return hmac.compare_digest(_sha256(a or ""), _sha256(b or ""))
+
+
+def load_admin_token():
+    try:
+        with open(admin_token_path(), encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def admin_token_matches(presented: str) -> bool:
+    """True only if presented equals the token stored under ~/.rivia (constant time)."""
+    stored = load_admin_token()
+    # Always compare so a missing file is not a faster rejection.
+    dummy = "missing-admin-token"
+    ok = tokens_equal(stored if stored is not None else dummy, (presented or "").strip())
+    return bool(stored) and ok
+
+
+def store_admin_token(token: str) -> str:
+    """Write the admin token to ~/.rivia/admin_token (mode 600). Never log the value."""
+    path = admin_token_path()
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+    fd, tmp = tempfile.mkstemp(prefix=".admin_token.", dir=directory or ".")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def clear_admin_token_file():
+    path = admin_token_path()
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+def path_fits_door(path: str, prefix: str) -> bool:
+    p = path if path.endswith("/") else path + "/"
+    return p.startswith(prefix)
+
+
+def token_fits_path(client_id, path) -> bool:
+    """True if this client_id is allowed to open path."""
+    allowed = DOORS.get(client_id)
+    if allowed is not None:
+        return path_fits_door(path, allowed)
+    return not any(path_fits_door(path, prefix) for prefix in DOORS.values())
 
 
 # ---------- storage ----------
@@ -491,12 +593,21 @@ class BearerGate:
             # A tokenless DELETE (session teardown) gets the same 401; that is expected.
             hdr = f'Bearer resource_metadata="{ISSUER}/.well-known/oauth-protected-resource/mcp"'
             return await Response(status_code=401, headers={"WWW-Authenticate": hdr})(scope, receive, send)
-        # Two doors: the app token only opens /app/..., bot tokens only the rest.
-        is_app = claims.get("client_id") == APP_CLIENT
-        if is_app != (scope["path"] + "/").startswith(APP_PREFIX):
+        # Door table: an app or admin token opens only its own prefix; every
+        # other token (bots) opens only the rest. Using either reserved token
+        # on the wrong door is 403 wrong_door.
+        if not token_fits_path(claims.get("client_id"), scope["path"]):
             return await JSONResponse({"error": "wrong_door",
                                        "error_description": "this token isn't for this path"},
                                       status_code=403)(scope, receive, send)
+        # Admin bearer must also match the token stored on the tablet (mode 600),
+        # compared in constant time. A leftover JWT after revoke or a mint that
+        # never wrote the file is rejected as 401, not logged.
+        if claims.get("client_id") == ADMIN_CLIENT:
+            raw = auth[7:] if auth[:7].lower() == "bearer " else ""
+            if not admin_token_matches(raw):
+                hdr = f'Bearer resource_metadata="{ISSUER}/.well-known/oauth-protected-resource/mcp"'
+                return await Response(status_code=401, headers={"WWW-Authenticate": hdr})(scope, receive, send)
         scope.setdefault("state", {})["claims"] = claims
         await self.app(scope, receive, send)
 
@@ -507,12 +618,13 @@ def with_cors(app):
     has to be answered before the gate would turn it away with a 401. It also
     puts the CORS headers on the gate's own 401/403, so a web page sees the
     real status instead of a blank CORS failure. Pure ASGI, doesn't buffer SSE."""
-    if not CORS_ORIGINS:
+    origins = cors_origins()
+    if not origins:
         return app
     from starlette.middleware.cors import CORSMiddleware
     return CORSMiddleware(
         app,
-        allow_origins=CORS_ORIGINS,
+        allow_origins=origins,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=CORS_HEADERS,
         expose_headers=["mcp-session-id", "www-authenticate"],
@@ -520,16 +632,19 @@ def with_cors(app):
     )
 
 
-def build_app(mcp_app=None, lifespan=None, app_mcp=None):
+def build_app(mcp_app=None, lifespan=None, app_mcp=None, admin_mcp=None):
     """mcp_app: an ASGI app that serves MCP at /mcp, e.g. FastMCP's
     mcp.http_app(path="/mcp"). app_mcp (optional): the same for the Rivia app,
-    mounted under /app (so it serves /app/mcp). Pass a lifespan that starts
-    both, or the MCP session managers never start."""
+    mounted under /app (so it serves /app/mcp). admin_mcp (optional): the same
+    for the admin door, mounted under /admin (so it serves /admin/mcp). Pass a
+    lifespan that starts every mounted MCP app, or the session managers never start."""
     if not (SIGNING_KEY and PASS_HASH and TOTP_SECRET):
         raise SystemExit("Missing RIVIA_JWT_KEY / RIVIA_PASS_HASH / RIVIA_TOTP_SECRET. Run: python rivia_auth.py setup")
     init_db()
     tail = ([Mount("/", app=mcp_app)] if mcp_app else
             [Mount("/mcp", app=echo_stub), Mount("/", app=echo_stub)])
+    if admin_mcp:
+        tail = [Mount("/admin", app=admin_mcp)] + tail
     if app_mcp:
         tail = [Mount("/app", app=app_mcp)] + tail
     routes = [
@@ -543,6 +658,41 @@ def build_app(mcp_app=None, lifespan=None, app_mcp=None):
         *tail,
     ]
     return with_cors(BearerGate(Starlette(routes=routes, lifespan=lifespan)))
+
+
+
+def mint_door_token(kind, days=None):
+    """Mint a door token. kind is 'app' or 'admin'. Minting one kind revokes only
+    that kind. The admin token is written under ~/.rivia (mode 600) and is not
+    printed by the CLI; this function returns it for in-process callers (tests).
+    """
+    if not SIGNING_KEY:
+        raise SystemExit("Load ~/.rivia/.env first (RIVIA_JWT_KEY is missing).")
+    kind = (kind or "").strip().lower()
+    if kind not in ("app", "admin"):
+        raise SystemExit("usage: python rivia_auth.py mint-token <app|admin> [days]")
+    client_id = APP_CLIENT if kind == "app" else ADMIN_CLIENT
+    label = "Rivia app" if kind == "app" else "Rivia admin"
+    if days is None:
+        days = APP_TOKEN_DAYS if kind == "app" else ADMIN_TOKEN_DAYS
+    days = int(days)
+    if days < 1:
+        raise SystemExit("days must be at least 1")
+    init_db()
+    now = int(time.time())
+    with db() as c:
+        c.execute("insert or ignore into clients values(?,?,?,?)", (client_id, "[]", label, now))
+        old = c.execute("update tokens set revoked=1 where client_id=? and revoked=0",
+                        (client_id,)).rowcount
+        jti = secrets.token_urlsafe(16)
+        claims = {"iss": ISSUER, "aud": RESOURCE, "sub": "owner", "client_id": client_id, "jti": jti,
+                  "iat": now, "exp": now + days * 86400, "kind": "access", "scope": SCOPE}
+        c.execute("insert into tokens values(?,?,?,?,0)", (jti, client_id, "access", now + days * 86400))
+    token = jwt.encode(claims, SIGNING_KEY, algorithm="HS256")
+    path = None
+    if kind == "admin":
+        path = store_admin_token(token)
+    return {"kind": kind, "token": token, "days": days, "revoked": old, "path": path, "client_id": client_id}
 
 
 # ---------- CLI ----------
@@ -565,30 +715,36 @@ def _cli():
         init_db()
         with db() as c:
             n = c.execute("update tokens set revoked=1 where revoked=0").rowcount
-        print(f"Revoked {n} tokens. Remove and re-add the connector in Grok Bot.")
-    elif cmd == "mint-app-token":
-        if not SIGNING_KEY:
-            raise SystemExit("Load ~/.rivia/.env first (RIVIA_JWT_KEY is missing).")
-        days = int(sys.argv[2]) if len(sys.argv) > 2 else 365
-        init_db()
-        now = int(time.time())
-        with db() as c:
-            c.execute("insert or ignore into clients values(?,?,?,?)", (APP_CLIENT, "[]", "Rivia app", now))
-            old = c.execute("update tokens set revoked=1 where client_id=? and revoked=0", (APP_CLIENT,)).rowcount
-            jti = secrets.token_urlsafe(16)
-            claims = {"iss": ISSUER, "aud": RESOURCE, "sub": "owner", "client_id": APP_CLIENT, "jti": jti,
-                      "iat": now, "exp": now + days * 86400, "kind": "access", "scope": SCOPE}
-            c.execute("insert into tokens values(?,?,?,?,0)", (jti, APP_CLIENT, "access", now + days * 86400))
-        print(jwt.encode(claims, SIGNING_KEY, algorithm="HS256"))
-        print("# App token, valid %d days, only for %s/app/mcp. Revoked %d older app token(s)."
-              % (days, ISSUER, old), file=sys.stderr)
-        print("# Paste it into the app's Dev settings. Don't share it; anyone with it can ask your bots.",
-              file=sys.stderr)
+        clear_admin_token_file()
+        print(f"Revoked {n} tokens and cleared the stored admin token. Remove and re-add the connector in Grok Bot.")
+    elif cmd in ("mint-app-token", "mint-token"):
+        if cmd == "mint-app-token":
+            kind = "app"
+            days_arg = sys.argv[2] if len(sys.argv) > 2 else None
+        else:
+            if len(sys.argv) < 3:
+                raise SystemExit("usage: python rivia_auth.py mint-token <app|admin> [days]")
+            kind = (sys.argv[2] or "").strip().lower()
+            days_arg = sys.argv[3] if len(sys.argv) > 3 else None
+        days = int(days_arg) if days_arg is not None else None
+        info = mint_door_token(kind, days)
+        if kind == "app":
+            print(info["token"])
+            print("# App token, valid %d days, only for %s/app/mcp. Revoked %d older app token(s)."
+                  % (info["days"], ISSUER, info["revoked"]), file=sys.stderr)
+            print("# Paste it into the app's Dev settings. Don't share it; anyone with it can ask your bots.",
+                  file=sys.stderr)
+        else:
+            # Never print the admin token. The file is the only copy this command writes.
+            print("Saved admin token to %s (mode 600). Valid %d days, only for /admin/mcp. "
+                  "Revoked %d older admin token(s). The token is not printed."
+                  % (info["path"], info["days"], info["revoked"]))
     elif cmd == "prune-clients":
         init_db()
         with db() as c:
-            n = c.execute("delete from clients where client_id != ? and client_id not in "
-                          "(select distinct client_id from tokens where revoked=0)", (APP_CLIENT,)).rowcount
+            n = c.execute("delete from clients where client_id not in (?, ?) and client_id not in "
+                          "(select distinct client_id from tokens where revoked=0)",
+                          (APP_CLIENT, ADMIN_CLIENT)).rowcount
         print(f"Removed {n} unused clients.")
     elif cmd == "status":
         init_db()
@@ -598,7 +754,8 @@ def _cli():
                                             (time.time(),)).fetchone()[0])
         print("redirect allowlist:", ", ".join(REDIRECTS), "+ loopback" if ALLOW_LOOPBACK else "")
         print("pinned CIMD clients:", ", ".join(PINNED_CLIENTS) or "-")
-        print("browser origins (CORS):", ", ".join(CORS_ORIGINS) or "none (CORS off)")
+        print("browser origins (CORS):", ", ".join(cors_origins()) or "none (CORS off)")
+        print("admin token file:", "present (not shown)" if load_admin_token() else "none")
     elif cmd == "registrations":
         init_db()
         with db() as c:

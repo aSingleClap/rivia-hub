@@ -27,6 +27,7 @@ import rivia_planner as rp
 import rivia_sched as sched
 import rivia_tools as tools
 import rivia_auth as ra
+import rivia_admin as admin
 import rivia_server as rs
 import uvicorn
 from fastmcp import Client
@@ -306,6 +307,8 @@ async def main():
        and "undo_schedule_change" not in bt and "app_places" not in bt
        and "app_arrival" not in bt and "app_log_ride" not in bt,
        "bot door has no scheduler tools")
+    ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
+       "admin tools stay off the app and bot doors")
     schema = getattr(at["ride_time"], "input_schema", None) or at["ride_time"].inputSchema
     props = (schema or {}).get("properties") or {}
     ok("from" in props and "to" in props, "ride_time schema uses public names from and to")

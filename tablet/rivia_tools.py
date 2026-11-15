@@ -79,6 +79,50 @@ def open_db():
     return con
 
 
+def list_tool_rows():
+    con = open_db()
+    try:
+        cols = ["name", "door", "action", "preset", "description", "model", "enabled", "updated"]
+        rows = list(con.execute(
+            "select name, door, action, preset, description, model, enabled, updated "
+            "from tools order by door, name"
+        ))
+        out = []
+        for r in rows:
+            item = dict(zip(cols, r))
+            preset = item.get("preset")
+            if isinstance(preset, str):
+                try:
+                    item["preset"] = json.loads(preset or "{}")
+                except ValueError:
+                    item["preset"] = {}
+            item["enabled"] = bool(item["enabled"])
+            item["model"] = bool(item["model"])
+            out.append(item)
+        return out
+    finally:
+        con.close()
+
+
+def list_call_rows(limit=100):
+    con = open_db()
+    try:
+        cols = ["ts", "door", "tool", "action", "ok", "code", "ms"]
+        rows = list(con.execute(
+            "select ts, door, tool, action, ok, code, ms from calls "
+            "order by ts desc, rowid desc limit ?",
+            (int(limit),),
+        ))
+        out = []
+        for r in rows:
+            item = dict(zip(cols, r))
+            item["ok"] = bool(item["ok"])
+            out.append(item)
+        return out
+    finally:
+        con.close()
+
+
 def log_call(door, tool, action, ok, code, ms):
     con = open_db()
     try:

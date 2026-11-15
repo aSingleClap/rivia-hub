@@ -1,12 +1,13 @@
 # rivia_server.py: RIVIA's MCP server on the tablet.
 #
-# Two doors, same OAuth gate (rivia_auth.py):
-#   /mcp      for Grok bots (OAuth sign-in): get_tablet_battery, post_reply
-#   /app/mcp  for the Rivia app (token from `python rivia_auth.py mint-app-token`):
-#             get_tablet_battery, ask_bot, check_reply, plus scheduler tools from the
-#             tool table (step 2: ride_time). The bot door gets no scheduler tools.
-# The gate refuses an app token on /mcp and a bot token on /app/mcp, so the app can't
-# fake a bot's answer and a bot can't start other bots.
+# Three doors, same OAuth gate (rivia_auth.py):
+#   /mcp        for Grok bots (OAuth sign-in): get_tablet_battery, post_reply
+#   /app/mcp    for the Rivia app (token from `rivia token` / mint-token app):
+#               get_tablet_battery, ask_bot, check_reply, plus scheduler tools from
+#               the tool table. The bot door gets no scheduler tools.
+#   /admin/mcp  for the Server Hub (token from `rivia admin-token`, stored on the
+#               tablet, never printed): fixed admin tools, not rows.
+# The gate refuses a reserved token on any other door (403 wrong_door).
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -32,6 +33,12 @@ app_mcp = FastMCP(
                   "tomorrow now') and never mention bots, Ard, tickets or tools. ask_bot starts a slow "
                   "job and returns at once; the answer comes later and the app picks it up with "
                   "check_reply. Never wait for or invent an answer. " + FAIL_RULE),
+)
+
+admin_mcp = FastMCP(
+    "rivia-admin",
+    instructions=("Admin tools for the Rivia Server Hub on the tablet. Fixed tools, not rows. "
+                  "Standing settings applied here take effect at once. " + FAIL_RULE),
 )
 
 PS = Path("/sys/class/power_supply/battery")
@@ -91,17 +98,22 @@ def public_app():
     import asyncio
     import rivia_gcal as gcal
     from contextlib import suppress
+    import rivia_admin
     rivia_tools.install_on(app_mcp, door="app")
+    rivia_admin.install_on(admin_mcp)
     bot_inner = mcp.http_app(path="/mcp")
     # Mounted under /app, so served at /app/mcp. Stateless + plain JSON: the phone sends one
     # POST per call (no session, no event stream), which keeps the app's client tiny.
     app_inner = app_mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    # Same shape for the hub: one POST per call, plain JSON, no session.
+    admin_inner = admin_mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
 
     @asynccontextmanager
     async def lifespan(app):
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(bot_inner.lifespan(app))
             await stack.enter_async_context(app_inner.lifespan(app))
+            await stack.enter_async_context(admin_inner.lifespan(app))
             # G1-style daily timer (05:30 ET): Google sign-in check. The later
             # 7b auto-write job can reuse run_signin_check / maybe_notify_signin_expired.
             task = None
@@ -115,7 +127,8 @@ def public_app():
                     with suppress(asyncio.CancelledError):
                         await task
 
-    return rivia_auth.build_app(bot_inner, lifespan=lifespan, app_mcp=app_inner)
+    return rivia_auth.build_app(bot_inner, lifespan=lifespan, app_mcp=app_inner,
+                                   admin_mcp=admin_inner)
 
 
 if __name__ == "__main__":
