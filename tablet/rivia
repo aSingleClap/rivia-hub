@@ -2,8 +2,8 @@
 # rivia: thin wrapper so `rivia sched ...` and the other rivia.sh commands work
 # from PATH. Resolves symlinks, then execs rivia.sh in the same directory
 # (on the tablet, ~/storage/shared/rivia/).
-# Install once in Termux:  rivia.sh install-cli
-#   (or: ln -sfn ~/storage/shared/rivia/rivia "$PREFIX/bin/rivia")
+# Install once in Termux (do not symlink this file onto PATH: shared storage
+# is mounted noexec):  bash ~/storage/shared/rivia/rivia.sh install-cli
 set -e
 src="$0"
 while [ -L "$src" ]; do

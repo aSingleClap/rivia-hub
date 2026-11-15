@@ -12,6 +12,8 @@
 #   rivia status    is it running, does it answer locally and at mcp.rivia.observer
 #   rivia test      run both test files (do this after editing rivia_auth.py)
 #   rivia sched selftest   run the planner checks (must pass after any planner change)
+#   rivia sched google-login  sign in to Google Calendar (read-only) on the tablet
+#   rivia sched events <day>  print primary-calendar events (today, tomorrow, weekday, or YYYY-MM-DD)
 #   rivia logs      last lines of the server and tunnel logs
 #   rivia regs      what clients tried to sign in (and which redirects were refused)
 #   rivia revoke    kill switch: revoke every token (re-add the connector after)
@@ -128,8 +130,10 @@ status() {
 
 # Planner / sched helpers. Resolve code next to this script (repo tablet/ on a
 # dev box, or ~/storage/shared/rivia when the script is deployed there).
-sched_selftest() {
-    local here code py
+sched_code_and_python() {
+    # Sets $code and $py, then cds to the code dir. Prefer the folder this
+    # script lives in (run it with bash; shared storage is noexec).
+    local here
     here="$(cd "$(dirname "$0")" && pwd)"
     if [ -f "$here/rivia_planner.py" ]; then
         code="$here"
@@ -150,18 +154,35 @@ sched_selftest() {
         die "no python3 (and no venv at $VENV)"
     fi
     cd "$code" || die "can't cd to $code"
+}
+
+sched_selftest() {
+    sched_code_and_python
     "$py" rivia_planner.py selftest
+}
+
+sched_gcal() {
+    sched_code_and_python
+    if [ -z "${RIVIA_GOOGLE_CLIENT_ID:-}" ] || [ -z "${RIVIA_GOOGLE_CLIENT_SECRET:-}" ]; then
+        load_env
+    fi
+    "$py" rivia_gcal.py "$@"
 }
 
 sched() {
     case "${1:-}" in
         selftest) sched_selftest ;;
-        *) die 'usage: rivia sched selftest' ;;
+        google-login) sched_gcal "$@" ;;
+        events)
+            [ -n "${2:-}" ] || die 'usage: rivia sched events <day>'
+            sched_gcal "$@"
+            ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day>' ;;
     esac
 }
 
-# Symlink tablet/rivia onto PATH. Idempotent (ln -sfn). Termux: $PREFIX/bin;
-# elsewhere ~/.local/bin.
+# Put `rivia` on PATH. Writes a bash wrapper (not a symlink: shared storage
+# is noexec on the tablet). Idempotent. Termux: $PREFIX/bin; else ~/.local/bin.
 install_cli() {
     local here dest dir
     here="$(cd "$(dirname "$0")" && pwd)"
@@ -196,7 +217,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -214,7 +235,7 @@ case "${1:-}" in
                  echo "Saved ~/.rivia/.env. Add RIVIA_TOTP_SECRET from it to your authenticator app."
              else rm -f "$HOME/.rivia/.env.new"; die "setup failed; nothing saved"; fi ;;
     token)   load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-app-token "${2:-365}" ;;
-    sched)   sched "${2:-}" ;;
+    sched)   sched "${@:2}" ;;
     install-cli) install_cli ;;
     ask)     [ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'usage: rivia ask ard "What does tomorrow look like? Don'"'"'t write anything."'
              load_venv; load_env; cd "$CODE" || exit 1
@@ -235,5 +256,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
