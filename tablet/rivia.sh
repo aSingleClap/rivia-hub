@@ -165,7 +165,7 @@ sched() {
 install_cli() {
     local here dest dir
     here="$(cd "$(dirname "$0")" && pwd)"
-    [ -f "$here/rivia" ] || die "can't see $here/rivia"
+    [ -f "$here/rivia.sh" ] || die "can't see $here/rivia.sh"
     if [ -n "${PREFIX:-}" ]; then
         dir="$PREFIX/bin"
     else
@@ -173,8 +173,13 @@ install_cli() {
     fi
     mkdir -p "$dir"
     dest="$dir/rivia"
-    ln -sfn "$here/rivia" "$dest"
-    echo "installed $dest -> $here/rivia"
+    # Shared storage is mounted noexec on Android, so a symlink to the copy
+    # there fails with "Permission denied". Write a small wrapper that runs
+    # rivia.sh through bash instead (safe to re-run; replaces an old symlink).
+    rm -f "$dest"
+    printf '#!/usr/bin/env bash\nexec bash "%s/rivia.sh" "$@"\n' "$here" > "$dest"
+    chmod 755 "$dest"
+    echo "installed $dest (runs bash $here/rivia.sh)"
     case ":$PATH:" in
         *":$dir:"*) ;;
         *) echo "note: $dir is not on PATH yet; add it (Termux already has \$PREFIX/bin)." ;;
