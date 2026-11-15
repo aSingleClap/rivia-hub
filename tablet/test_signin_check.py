@@ -127,11 +127,16 @@ os.environ["RIVIA_GOOGLE_TOKEN_URL"] = "http://127.0.0.1:%d/token" % port
 os.environ["RIVIA_GOOGLE_EVENTS_URL"] = "http://127.0.0.1:%d/events" % port
 
 
-def good_token():
+def good_token(scope=None):
     gcal.save_tokens({"refresh_token": "refresh-good", "access_token": "access-good",
-                      "expiry": time.time() + 3600, "scope": gcal.SCOPE_READ, "token_type": "Bearer"})
+                      "expiry": time.time() + 3600,
+                      "scope": scope or gcal.SCOPE_READ, "token_type": "Bearer"})
     gcal.reset_clock()
     fake.grant_error = None
+
+
+def complete_token():
+    good_token(scope=gcal.SCOPE_ALL)
 
 
 def expired_token():
@@ -159,23 +164,51 @@ ok(gcal.signin_check_due(NEXT_DAY, last_ran_day="2026-11-15") is True,
    "next day after 05:30 is due again")
 
 
-# ── no notification when the read is fine ──
-clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY)
+# ── calendar read still works; a read-only token is flagged for re-sign-in ──
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
 clear_notices()
 good_token()
 ok(gcal.signin_check_due(NOW) is True, "due before the first successful run")
 got = gcal.run_signin_check(now=NOW, mark_ran=True)
-ok(got["ok"] is True and got["written"] is False and got["notified"] is False,
-   "valid sign-in: ok, never writes, no notification")
-ok(got["day"] == "2026-11-15" and "valid" in (got.get("message") or "").lower(),
-   "valid sign-in reports the day and a short message")
-ok(notices() == [], "no notification when the read is fine")
+ok(got["ok"] is True and got["written"] is False,
+   "read-only token: calendar read is still ok and never writes")
+ok(got["needs_relogin"] is True and got.get("scopes_complete") is False,
+   "read-only token is flagged as needing re-sign-in")
+ok("valid" in (got.get("message") or "").lower()
+   and "google-login --write" in (got.get("message") or ""),
+   "message says reads are valid and to re-run google-login --write")
+ok(got["notified"] is True, "05:30 flags missing write/Drive scopes once")
+n = notices()
+ok(len(n) == 1, "one scope-gap notification on the first check")
+ok("--content" in n[0] and n[0][n[0].index("--content") + 1] == gcal.NOTIFY_SCOPE_CONTENT,
+   "notification tells you to run rivia sched google-login --write")
 ok(gcal.last_signin_check_day() == "2026-11-15", "successful 05:30 run is recorded")
 ok(gcal.signin_check_due(NOW) is False, "catch-up does not re-run after a successful check")
+# same day: flag remains, no second notification
+got_again = gcal.run_signin_check(now=NOW, mark_ran=True)
+ok(got_again["ok"] is True and got_again["needs_relogin"] is True
+   and got_again["notified"] is False and len(notices()) == 1,
+   "same-day check still flags missing scopes but does not notify again")
+
+# ── no notification when the read is fine and all three scopes are granted ──
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
+clear_notices()
+complete_token()
+got = gcal.run_signin_check(now=NOW, mark_ran=True)
+ok(got["ok"] is True and got["written"] is False and got["notified"] is False,
+   "complete scopes: ok, never writes, no notification")
+ok(got.get("scopes_complete") is True and got.get("needs_relogin") is False,
+   "complete scopes are not flagged for re-sign-in")
+ok(got["day"] == "2026-11-15" and (got.get("message") or "") == "Google sign-in is valid.",
+   "complete scopes report a short valid-sign-in message")
+ok(set(got.get("scopes") or []) == set(gcal.SCOPES_WRITE),
+   "signin-check lists all three granted scopes")
+ok(notices() == [], "no notification when the read is fine and scopes are complete")
+ok(gcal.last_signin_check_day() == "2026-11-15", "successful complete-scope run is recorded")
 
 
 # ── fires on expired grant ──
-clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY)
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
 clear_notices()
 expired_token()
 got = gcal.run_signin_check(now=NOW, mark_ran=True)
@@ -205,7 +238,7 @@ ok(got3["notified"] is True and len(notices()) == 2, "next day notifies once mor
 
 
 # ── missing termux-notification does not crash ──
-clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY)
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
 clear_notices()
 expired_token()
 saved_path = os.environ["PATH"]
@@ -228,12 +261,13 @@ ok(notices() == [], "missing binary wrote no notification log")
 
 
 # ── CLI: rivia sched signin-check (does not mark the 05:30 run) ──
-clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY)
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
 clear_notices()
-good_token()
+complete_token()
 ok(gcal.signin_check_due(NOW) is True, "due before a manual check")
 cli_ok = gcal.cmd_signin_check(now=NOW)
-ok(cli_ok["ok"] is True and cli_ok["notified"] is False, "signin-check command succeeds when signed in")
+ok(cli_ok["ok"] is True and cli_ok["notified"] is False and cli_ok.get("scopes_complete") is True,
+   "signin-check command succeeds when signed in with all scopes")
 ok(gcal.last_signin_check_day() is None or gcal.last_signin_check_day() != "2026-11-15",
    "manual signin-check does not mark the 05:30 run")
 ok(gcal.signin_check_due(NOW) is True, "05:30 catch-up is still due after a manual check")
@@ -257,7 +291,7 @@ ok(payload.get("notified") is False, "CLI second call the same day does not noti
 
 
 # ── in-server loop: catch-up on start, then once a day ──
-clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY)
+clear_meta(gcal.NOTICE_DAY_KEY, "gcal_login_notice", gcal.CHECK_DAY_KEY, gcal.SCOPE_NOTICE_DAY_KEY)
 clear_notices()
 good_token()
 gcal.mark_signin_check_ran("2026-11-14")  # yesterday; 06:00 start should catch up
