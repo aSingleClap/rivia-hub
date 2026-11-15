@@ -53,6 +53,11 @@ def append_fixed_lines(description, action):
     if info.get("time_bearing"):
         parts.append("Say times exactly as their spoken value, never work one out, "
                      "say every must_say fact, offer decisions_for_jordan and never pick one.")
+    if action == "sched.change_setting":
+        line = sched.PENDING_LINE
+        blob = " ".join(parts)
+        if line.lower() not in blob.lower():
+            parts.append(line)
     return " ".join(parts)
 
 

@@ -310,19 +310,25 @@ sat_again = sched.plan_day_sync(SAT, now=NOW)
 ok(gym_minutes(sat_again) == 150, "after undo, Saturday is back to the 120-minute workout")
 
 
-# ── a standing change from the app door is refused and changes no plan (G7) ──
-err = refused(lambda: sched.change_setting_sync(
-    "workout_minutes", 90, "standing", door="app", now=NOW, reason="standing from Labs"))
-ok(err is not None and err.code == "standing_not_available"
-   and "not available" in str(err).lower(),
-   "a standing change from the app door is refused plainly")
+# ── a standing change from the app door is pending and changes no plan (G7) ──
+pend_sync = sched.change_setting_sync(
+    "workout_minutes", 90, "standing", door="app", now=NOW, reason="standing from Labs")
+ok(pend_sync.get("status") == "pending" and pend_sync.get("asked") == "app"
+   and pend_sync.get("change_id"),
+   "a standing change from the app door is queued as pending")
 # tool form
 pend = sched.change_setting_tool("workout_minutes", "standing", 90)
-ok(pend["ok"] is False and pend["error"]["code"] == "standing_not_available",
-   "standing change tool returns standing_not_available")
+ok(pend["ok"] is True and pend["kind"] == "pending"
+   and pend["message"] == sched.PENDING_MESSAGE
+   and (pend.get("data") or {}).get("status") == "pending"
+   and (pend.get("data") or {}).get("change_id") == pend_sync["change_id"],
+   "standing change tool returns waiting for approval and the same pending item")
+ok(sched.PENDING_LINE.lower() in sched.CHANGE_SETTING_DESCRIPTION.lower(),
+   "the change-setting description includes the pending-result line")
+ok(standing("workout_minutes") is None, "a pending standing change is not written yet")
 ok(standing("ride_estimate.farm_pf") == 17, "seeded estimates are still 17/15")
 ok(gym_minutes(sched.plan_day_sync(SAT, now=NOW)) == 150,
-   "a refused standing change leaves Saturday's plan unchanged")
+   "a pending standing change leaves Saturday's plan unchanged")
 
 # day out of the 14-day window
 err = refused(lambda: sched.change_setting_sync(

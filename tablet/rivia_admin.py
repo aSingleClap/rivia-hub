@@ -1,7 +1,7 @@
 # rivia_admin.py: fixed tools on the /admin MCP door. Not rows, not renameable,
 # never registered on the bot or app doors. save_tool / delete_tool / test_tool
-# come later; list_changes / approve_change / reject_change / undo_change come
-# with the approval queue.
+# come later. list_changes / approve_change / reject_change / undo_change are
+# the approval queue.
 import os
 import signal
 import threading
@@ -21,6 +21,10 @@ ADMIN_TOOLS = (
     "get_settings",
     "set_setting",
     "restart_server",
+    "list_changes",
+    "approve_change",
+    "reject_change",
+    "undo_change",
 )
 
 # Tests replace this so calling restart_server does not kill the test process.
@@ -189,6 +193,74 @@ def restart_server() -> dict:
     }
 
 
+def list_changes(status: str | None = None, limit: int = 100) -> dict:
+    """Pending and recent setting changes, including who asked (app, admin, or system)."""
+    if not sched.selftest_ok():
+        return sched.fail(
+            "selftest_failed",
+            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+            "planner",
+        )
+    try:
+        data = sched.list_changes_sync(status=status, limit=limit)
+        return sched.ok_reply("changes", data)
+    except sched.SettingsError as e:
+        return sched._settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return sched.fail("internal", repr(e), "settings")
+
+
+def approve_change(change_id: str) -> dict:
+    """Re-run every check and apply a pending change once. A second approve is refused."""
+    if not sched.selftest_ok():
+        return sched.fail(
+            "selftest_failed",
+            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+            "planner",
+        )
+    try:
+        data = sched.approve_change_sync(change_id)
+        return sched.ok_reply("change", data, ref=data.get("change_id"))
+    except sched.SettingsError as e:
+        return sched._settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return sched.fail("internal", repr(e), "settings")
+
+
+def reject_change(change_id: str) -> dict:
+    """Reject a pending change. The plan is left unchanged."""
+    if not sched.selftest_ok():
+        return sched.fail(
+            "selftest_failed",
+            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+            "planner",
+        )
+    try:
+        data = sched.reject_change_sync(change_id)
+        return sched.ok_reply("change", data, ref=data.get("change_id"))
+    except sched.SettingsError as e:
+        return sched._settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return sched.fail("internal", repr(e), "settings")
+
+
+def undo_change(change_id: str | None = None) -> dict:
+    """Undo an applied change. Standing restores from this door take effect at once."""
+    if not sched.selftest_ok():
+        return sched.fail(
+            "selftest_failed",
+            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+            "planner",
+        )
+    try:
+        data = sched.undo_change_sync(change_id=change_id, door="admin")
+        return sched.ok_reply("undo", data, ref=data.get("change_id"))
+    except sched.SettingsError as e:
+        return sched._settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return sched.fail("internal", repr(e), "settings")
+
+
 def install_on(mcp):
     """Register the fixed admin tools on the admin FastMCP app."""
     mcp.tool()(hub_status)
@@ -198,3 +270,7 @@ def install_on(mcp):
     mcp.tool()(get_settings)
     mcp.tool()(set_setting)
     mcp.tool()(restart_server)
+    mcp.tool()(list_changes)
+    mcp.tool()(approve_change)
+    mcp.tool()(reject_change)
+    mcp.tool()(undo_change)
