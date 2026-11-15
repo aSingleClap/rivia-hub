@@ -220,9 +220,12 @@ def approve_change(change_id: str) -> dict:
         )
     try:
         data = sched.approve_change_sync(change_id)
-        return sched.ok_reply("change", data, ref=data.get("change_id"))
+        kind = "write" if data.get("key") == "write_day" or data.get("kind") == "write_day" else "change"
+        return sched.ok_reply(kind, data, ref=data.get("change_id") or data.get("day"))
     except sched.SettingsError as e:
         return sched._settings_fail(e)
+    except gcal.GcalError as e:
+        return sched.fail(e.code, str(e), e.step or "calendar")
     except Exception as e:  # noqa: BLE001
         return sched.fail("internal", repr(e), "settings")
 

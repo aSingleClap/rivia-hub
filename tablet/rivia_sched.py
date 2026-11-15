@@ -303,6 +303,19 @@ PENDING_EXPIRE_S = 24 * 3600
 PENDING_LINE = "A pending result has not happened yet."
 PENDING_MESSAGE = "waiting for approval"
 
+WRITE_DAY_DESCRIPTION = (
+    "Write Jordan's planned blocks for a day to the Rivia calendar. "
+    "Always waits for approval; a pending result has not happened yet. "
+    "It never writes to the primary calendar."
+)
+WRITE_DAY_NOTIFY = (
+    "A planned Rivia day changed since its preview and was not written. "
+    "Open the hub to review."
+)
+EVENING_HOUR, EVENING_MINUTE = 21, 0
+META_EVENING_DAY = "evening_refresh_day"
+DEFAULT_AUTO_WRITE = "05:30"
+
 GET_SETTINGS_DESCRIPTION = (
     "Jordan's schedule settings for a day: each key's value, default, unit, range, "
     "and whether it comes from the default, a standing value, or a day override."
@@ -801,11 +814,101 @@ def _row_created_s(row):
         return 0
 
 
+def _preview_obj(row):
+    raw = row[9] if row is not None and len(row) > 9 else None
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+def _block_start_s(b):
+    start = (b or {}).get("start")
+    if isinstance(start, dict):
+        if start.get("epoch") is not None:
+            try:
+                return int(start["epoch"])
+            except (TypeError, ValueError):
+                pass
+        start = start.get("iso") or start.get("dateTime")
+    if start:
+        try:
+            return rp.to_epoch(start, "start")
+        except Exception:
+            return None
+    return None
+
+
+def _preview_first_start(row, preview=None):
+    """First leave-home / stop / ride in the preview.
+
+    Overnight sleep (and other pre-cutoff detail blocks) do not count.
+    Otherwise a 05:30 auto-write would always be too late.
+    """
+    preview = preview if preview is not None else _preview_obj(row)
+    blocks = list(preview.get("blocks") or [])
+    for b in blocks:
+        if (b.get("title") or "") == "Ride: home to the farm":
+            s = _block_start_s(b)
+            if s is not None:
+                return s
+    for b in blocks:
+        if b.get("kind") in ("stop", "ride"):
+            s = _block_start_s(b)
+            if s is not None:
+                return s
+    starts = []
+    for b in blocks:
+        s = _block_start_s(b)
+        if s is not None:
+            starts.append(s)
+    return min(starts) if starts else None
+
+
+def _write_day_too_late(row, now_s):
+    """A write_day is too late once the day is over or leave-home has started."""
+    day_s = row[5] if row is not None and len(row) > 5 else None
+    try:
+        day = date.fromisoformat(str(day_s))
+    except Exception:
+        return _row_created_s(row) + PENDING_EXPIRE_S <= now_s
+    now_d = datetime.fromtimestamp(now_s, gcal.TZ).date()
+    if now_d > day:
+        return True
+    first = _preview_first_start(row)
+    if first is not None and now_s >= first:
+        return True
+    return False
+
+
+def _write_day_expires_s(row):
+    first = _preview_first_start(row)
+    if first is not None:
+        return first
+    day_s = row[5]
+    try:
+        day = date.fromisoformat(str(day_s))
+        end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=gcal.TZ)
+        return int(end.timestamp())
+    except Exception:
+        return _row_created_s(row) + PENDING_EXPIRE_S
+
+
 def _expires_iso(row):
+    if (row[3] == "write_day" or row[6] == "write_day"):
+        return rp.iso(_write_day_expires_s(row))
     return rp.iso(_row_created_s(row) + PENDING_EXPIRE_S)
 
 
 def _is_expired(row, now_s):
+    # Cutoff wins over the 24 h expiry for write_day: keep it pending until
+    # it is too late to write (first block started, or the day is over).
+    if row[3] == "write_day" or row[6] == "write_day":
+        return _write_day_too_late(row, now_s)
     return _row_created_s(row) + PENDING_EXPIRE_S <= now_s
 
 
@@ -874,7 +977,7 @@ def _pending_result(con, row, *, duplicate=False):
 
 
 def _change_public(row):
-    return {
+    out = {
         "change_id": row[0],
         "created": row[1],
         "door": row[2],
@@ -891,6 +994,9 @@ def _change_public(row):
         "request_id": row[13],
         "expires": _expires_iso(row) if row[10] in ("pending", "expired") else None,
     }
+    if row[3] == "write_day" or row[6] == "write_day":
+        out["preview"] = _preview_obj(row)
+    return out
 
 
 def _ride_in_use(a, b):
@@ -1095,6 +1201,12 @@ def _undo_change(con, change_id=None, door="app", now=None):
         if not row:
             raise SettingsError("no_undo", "There is no change from this door in the last 24 hours to undo.", step="settings")
     cid, created, row_door, kind, scope, day_s, key, old_s, new_s, preview, status, decided, reason, request_id = row
+    if kind == "write_day" or key == "write_day":
+        raise SettingsError(
+            "bad_change",
+            "A written day cannot be undone from this tool. Reject the pending item or write a new plan.",
+            step="settings",
+        )
     if status != "applied":
         raise SettingsError("bad_change", "Change %s cannot be undone (status is %s)." % (cid, status), step="settings")
     # Undoing a standing change through the app door is itself a standing change,
@@ -1635,6 +1747,456 @@ def cmd_call(name, raw_json="{}"):
 
 
 # Only actions that exist now belong here (G5: seed a row only once its action works).
+
+def _parse_hm(raw, default=(5, 30)):
+    try:
+        h, m = str(raw).strip().split(":")
+        h, m = int(h), int(m)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    except Exception:
+        pass
+    return default
+
+
+def auto_write_hm(con=None):
+    """Hour and minute of the morning tick, from auto_write_time, else env, else 05:30."""
+    raw = None
+    close = False
+    try:
+        if con is None:
+            con = rp.db_open()
+            close = True
+        row = con.execute("select value from settings where key=?", ("auto_write_time",)).fetchone()
+        if row and row[0] is not None:
+            raw = _load_value(row[0])
+    except Exception:
+        raw = None
+    finally:
+        if close and con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+    if not raw:
+        raw = os.environ.get("RIVIA_SIGNIN_CHECK_TIME") or DEFAULT_AUTO_WRITE
+    return _parse_hm(raw)
+
+
+def _plan_record(day, now=None, con=None):
+    events = gcal.events_for_plan(day, day, before=2, after=2, now=now)
+    ensure_store(now=now)
+    out = _plan_one(day, events, now=now, con=con)
+    return out["days"][0], out
+
+
+def _preview_from_rec(rec):
+    return {
+        "kind": "write_day",
+        "day": rec.get("day"),
+        "status": rec.get("status"),
+        "blocks": rec.get("blocks") or [],
+        "calendar_events": rec.get("calendar_events") or [],
+        "shift": rec.get("shift"),
+        "problems": rec.get("problems") or [],
+    }
+
+
+def _block_fingerprint(preview):
+    preview = preview or {}
+    blocks = []
+    for b in preview.get("blocks") or []:
+        start, end = b.get("start"), b.get("end")
+        start_s = start.get("iso") if isinstance(start, dict) else start
+        end_s = end.get("iso") if isinstance(end, dict) else end
+        blocks.append((b.get("kind"), b.get("title"), b.get("place"), start_s, end_s))
+    return (preview.get("status"), tuple(blocks))
+
+
+def _find_pending_write_day(con, day_s, now_s):
+    expire_pending(con, now_s)
+    return con.execute(
+        "select * from changes where status='pending' and kind='write_day' and ifnull(day,'')=? "
+        "order by created desc, rowid desc limit 1",
+        (day_s or "",),
+    ).fetchone()
+
+
+def _rivia_events_exist(day_s):
+    cal_id = gcal._meta_get(gcal.META_RIVIA_ID)
+    if not cal_id or str(cal_id).strip().lower() == "primary":
+        return False
+    try:
+        return bool(gcal.list_rivia_events(cal_id, day_s))
+    except Exception:
+        return False
+
+
+def _write_day_pending_result(row, *, duplicate=False):
+    preview = _preview_obj(row)
+    return {
+        "change_id": row[0],
+        "key": "write_day",
+        "kind": "write_day",
+        "day": row[5],
+        "status": row[10],
+        "preview": preview,
+        "asked": _asked_of(row[2]),
+        "expires": _expires_iso(row),
+        "reason": row[12],
+        "duplicate": duplicate,
+        "written": False,
+        "request_id": row[13],
+    }
+
+
+def _queue_write_day(con, rec, *, door, now_s, reason=None, request_id=None):
+    preview = _preview_from_rec(rec)
+    change_id = _new_id()
+    created = rp.iso(now_s)
+    _log_change(
+        con, change_id=change_id, created=created, door=door, kind="write_day",
+        scope="day", day=rec["day"], key="write_day", old=None,
+        new=None, preview=json.dumps(preview), status="pending", decided=None,
+        reason=reason, request_id=request_id,
+    )
+    row = con.execute("select * from changes where change_id=?", (change_id,)).fetchone()
+    return _write_day_pending_result(row, duplicate=False)
+
+
+def write_day_sync(day_arg="tomorrow", request_id=None, door="app", now=None, con=None, reason=None):
+    """Always queue a write_day with a preview of the blocks. Never writes here."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con, now=now)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+        day, _asked = gcal.resolve_day(day_arg or "tomorrow", now=now)
+        rec, _out = _plan_record(day, now=now, con=con)
+        pending = _find_pending_write_day(con, rec["day"], now_s)
+        if pending:
+            return _write_day_pending_result(pending, duplicate=True)
+        if request_id:
+            existing = con.execute(
+                "select * from changes where request_id=? order by created desc, rowid desc limit 1",
+                (request_id,),
+            ).fetchone()
+            if existing and existing[10] == "pending" and existing[3] == "write_day":
+                return _write_day_pending_result(existing, duplicate=True)
+        return _queue_write_day(con, rec, door=door or "app", now_s=now_s,
+                                reason=reason, request_id=request_id)
+    finally:
+        if close:
+            con.close()
+
+
+def _stable_plan_now(day):
+    """Plan from just before the calendar day so overnight sleep is not under_way."""
+    return datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=gcal.TZ) - timedelta(seconds=1)
+
+
+def _approve_write_day(con, row, now, now_s):
+    cid, created, door, kind, scope, day_s, key, old_s, new_s, preview_s, status, decided, reason, request_id = row
+    preview = _preview_obj(row)
+    day = date.fromisoformat(str(day_s))
+    # Re-plan at the start of the day so overnight sleep does not flip the
+    # status to under_way (which would drop calendar_events). Catch-up is
+    # refused separately once leave-home has started.
+    rec, _out = _plan_record(day, now=_stable_plan_now(day), con=con)
+    if _write_day_too_late(row, now_s):
+        raise SettingsError(
+            "under_way",
+            "The day has already started; nothing was written.",
+            step="write",
+        )
+    fresh = _preview_from_rec(rec)
+    if _block_fingerprint(preview) != _block_fingerprint(fresh):
+        raise SettingsError(
+            "changed_since_preview",
+            "The plan changed since this preview; nothing was written.",
+            step="write",
+            extra={"preview": preview, "current": fresh, "day": day_s},
+        )
+    if rec["status"] == "not_written":
+        # Preview agreed it was not_written: still write nothing.
+        decided_s = rp.iso(now_s)
+        con.execute("update changes set status='applied', decided=? where change_id=?", (decided_s, cid))
+        return {
+            "change_id": cid, "key": "write_day", "kind": "write_day", "day": day_s,
+            "status": "applied", "written": False, "plan_status": rec["status"],
+            "created": 0, "deleted": 0, "asked": _asked_of(door), "reason": reason,
+        }
+    result = gcal.write_rivia_day(
+        day_s, rec["status"], rec.get("calendar_events") or [],
+    )
+    decided_s = rp.iso(now_s)
+    con.execute("update changes set status='applied', decided=? where change_id=?", (decided_s, cid))
+    data = {
+        "change_id": cid, "key": "write_day", "kind": "write_day", "day": day_s,
+        "status": "applied", "written": bool(result.get("written")),
+        "plan_status": rec["status"], "created": result.get("created") or 0,
+        "deleted": result.get("deleted") or 0,
+        "calendar_id": result.get("calendar_id"),
+        "batch_id": result.get("batch_id"),
+        "asked": _asked_of(door), "reason": reason, "approved": True,
+    }
+    return data
+
+
+def write_day_tool(day: str = "tomorrow", request_id: str | None = None) -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = write_day_sync(day_arg=day or "tomorrow", request_id=request_id, door="app")
+        return ok_reply("pending", data, ref=data.get("day") or data.get("change_id"),
+                        message=PENDING_MESSAGE)
+    except SettingsError as e:
+        return _settings_fail(e)
+    except gcal.GcalError as e:
+        return fail(e.code, str(e), e.step or "calendar")
+    except rp.RiviaError as e:
+        if e.code == "need_maps":
+            return fail("need_estimate", str(e), "planner",
+                        data={"pairs": e.extra.get("pairs") or []})
+        step = "input" if e.code in ("bad_day", "bad_days", "bad_events") else "planner"
+        return fail(e.code, str(e), step, data=dict(e.extra) if e.extra else {})
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "write")
+
+
+write_day = tool(write_day_tool)
+
+
+def _cutoff_for_day(day, con=None):
+    h, m = auto_write_hm(con=con)
+    return datetime(day.year, day.month, day.day, h, m, 0, tzinfo=gcal.TZ)
+
+
+def auto_write_due(now=None, con=None):
+    """Auto-approve each still-pending write_day whose cutoff has passed.
+
+    Standing changes are never auto-approved. If the plan changed since the
+    preview, write nothing, mark the item failed, and notify.
+    """
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con, now=now)
+        close = True
+    results = []
+    try:
+        now = now or datetime.now(gcal.TZ)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=gcal.TZ)
+        now = now.astimezone(gcal.TZ)
+        now_s = int(now.timestamp())
+        expire_pending(con, now_s)
+        rows = list(con.execute(
+            "select * from changes where status='pending' and kind='write_day' order by created, rowid"
+        ))
+        for row in rows:
+            day_s = row[5]
+            try:
+                day = date.fromisoformat(str(day_s))
+            except Exception:
+                continue
+            if now < _cutoff_for_day(day, con=con):
+                continue
+            if _write_day_too_late(row, now_s):
+                continue
+            try:
+                data = approve_change_sync(row[0], now=now, con=con)
+                results.append({"change_id": row[0], "day": day_s, "ok": True,
+                                "written": bool(data.get("written")), "data": data})
+            except SettingsError as e:
+                if e.code == "changed_since_preview":
+                    decided_s = rp.iso(now_s)
+                    con.execute(
+                        "update changes set status='failed', decided=?, reason=? where change_id=?",
+                        (decided_s, e.code, row[0]),
+                    )
+                    gcal.post_termux_notification(WRITE_DAY_NOTIFY)
+                results.append({"change_id": row[0], "day": day_s, "ok": False,
+                                "error": e.code, "msg": str(e)})
+            except gcal.GcalError as e:
+                results.append({"change_id": row[0], "day": day_s, "ok": False,
+                                "error": e.code, "msg": str(e)})
+            except Exception as e:  # noqa: BLE001
+                print("rivia: auto-write of %s failed (%s); continuing." % (row[0], type(e).__name__),
+                      file=sys.stderr)
+                results.append({"change_id": row[0], "day": day_s, "ok": False,
+                                "error": "internal", "msg": type(e).__name__})
+        return results
+    finally:
+        if close:
+            con.close()
+
+
+def propose_tomorrow(now=None, con=None):
+    """D2: create a system write_day for tomorrow, or keep an existing pending one.
+
+    Propose nothing if there is nothing to write or delete.
+    """
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con, now=now)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=gcal.TZ)
+        now = now.astimezone(gcal.TZ)
+        now_s = int(now.timestamp())
+        tomorrow = now.date() + timedelta(days=1)
+        day_s = tomorrow.isoformat()
+        existing = _find_pending_write_day(con, day_s, now_s)
+        if existing:
+            return {"proposed": False, "kept": existing[0], "day": day_s,
+                    "status": "pending"}
+        rec, _out = _plan_record(tomorrow, now=now, con=con)
+        has_events = _rivia_events_exist(day_s)
+        if rec["status"] == "planned":
+            pass
+        elif rec["status"] == "no_shift" and has_events:
+            pass
+        else:
+            return {"proposed": False, "reason": rec.get("status") or "empty",
+                    "day": day_s}
+        data = _queue_write_day(
+            con, rec, door="system", now_s=now_s,
+            reason="auto proposal for tomorrow",
+        )
+        return {"proposed": True, "change_id": data["change_id"], "day": day_s,
+                "plan_status": rec["status"], "asked": "system"}
+    finally:
+        if close:
+            con.close()
+
+
+def evening_refresh_due(now, last_ran_day=None):
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=gcal.TZ)
+    now = now.astimezone(gcal.TZ)
+    cutoff = now.replace(hour=EVENING_HOUR, minute=EVENING_MINUTE, second=0, microsecond=0)
+    if now < cutoff:
+        return False
+    last = last_ran_day if last_ran_day is not None else gcal._meta_get(META_EVENING_DAY)
+    return last != now.date().isoformat()
+
+
+def mark_evening_refresh_ran(day_s):
+    try:
+        gcal._meta_set(META_EVENING_DAY, day_s)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: could not record evening refresh (%s); continuing." % type(e).__name__,
+              file=sys.stderr)
+
+
+def run_evening_refresh(now=None, con=None):
+    """D5: at 21:00 ET, re-plan tomorrow. If it differs, supersede the pending item."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con, now=now)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=gcal.TZ)
+        now = now.astimezone(gcal.TZ)
+        now_s = int(now.timestamp())
+        tomorrow = now.date() + timedelta(days=1)
+        day_s = tomorrow.isoformat()
+        rec, _out = _plan_record(tomorrow, now=now, con=con)
+        fresh = _preview_from_rec(rec)
+        pending = _find_pending_write_day(con, day_s, now_s)
+        mark_evening_refresh_ran(now.date().isoformat())
+        has_events = _rivia_events_exist(day_s)
+        worthwhile = rec["status"] == "planned" or (rec["status"] == "no_shift" and has_events)
+        if pending is None:
+            if not worthwhile:
+                return {"superseded": False, "proposed": False, "day": day_s,
+                        "reason": rec.get("status")}
+            data = _queue_write_day(
+                con, rec, door="system", now_s=now_s,
+                reason="evening refresh proposal",
+            )
+            return {"superseded": False, "proposed": True,
+                    "change_id": data["change_id"], "day": day_s}
+        old = _preview_obj(pending)
+        if _block_fingerprint(old) == _block_fingerprint(fresh):
+            return {"superseded": False, "proposed": False,
+                    "change_id": pending[0], "day": day_s}
+        decided_s = rp.iso(now_s)
+        con.execute(
+            "update changes set status='superseded', decided=? where change_id=?",
+            (decided_s, pending[0]),
+        )
+        if not worthwhile:
+            return {"superseded": True, "proposed": False, "old": pending[0],
+                    "day": day_s, "reason": rec.get("status")}
+        data = _queue_write_day(
+            con, rec, door="system", now_s=now_s,
+            reason="evening refresh; previous proposal superseded",
+        )
+        return {"superseded": True, "proposed": True, "old": pending[0],
+                "change_id": data["change_id"], "day": day_s}
+    finally:
+        if close:
+            con.close()
+
+
+def run_morning_tick(now=None):
+    """Sign-in check, auto-write due write_days, propose tomorrow, Drive backup."""
+    now = now or datetime.now(gcal.TZ)
+    if getattr(now, "tzinfo", None) is None:
+        now = now.replace(tzinfo=gcal.TZ)
+    now = now.astimezone(gcal.TZ)
+    out = {"ok": True, "day": now.date().isoformat(),
+           "signin": None, "auto_write": [], "propose": None, "backup": None}
+    try:
+        out["signin"] = gcal.run_signin_check(now=now, mark_ran=True)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: sign-in check failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["signin"] = {"ok": False, "error": type(e).__name__}
+    try:
+        out["auto_write"] = auto_write_due(now=now)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: auto-write failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["auto_write"] = [{"ok": False, "error": type(e).__name__}]
+    try:
+        out["propose"] = propose_tomorrow(now=now)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: tomorrow proposal failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["propose"] = {"proposed": False, "error": type(e).__name__}
+    try:
+        out["backup"] = gcal.run_drive_backup()
+    except Exception as e:  # noqa: BLE001
+        print("rivia: daily Drive backup failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["backup"] = {"ok": False, "error": type(e).__name__}
+    return out
+
+
+def cmd_morning_tick():
+    out = run_morning_tick()
+    out = dict(out)
+    out["ok"] = True
+    return out
+
+
+def cmd_evening_refresh():
+    out = run_evening_refresh()
+    out = dict(out)
+    out["ok"] = True
+    return out
+
+
 ACTIONS = {
     "sched.ride_time": {
         "fn": ride_time,
@@ -1722,6 +2284,15 @@ ACTIONS = {
         "time_bearing": False,
         "description": LOG_RIDE_DESCRIPTION,
     },
+    "sched.write_day": {
+        "fn": write_day,
+        "lockable": ("day",),
+        "py_params": {"day": "day", "request_id": "request_id"},
+        "doors": ("app",),
+        "kind": "pending",
+        "time_bearing": True,
+        "description": WRITE_DAY_DESCRIPTION,
+    },
 }
 
 
@@ -1775,6 +2346,8 @@ def approve_change_sync(change_id, now=None, con=None):
         if status != "pending":
             raise SettingsError("not_pending", "Change %s cannot be approved (status is %s)." % (cid, status),
                                 step="settings")
+        if kind == "write_day" or key == "write_day":
+            return _approve_write_day(con, row, now, now_s)
         coerced = _load_value(new_s)
         _rerun_checks(con, key, coerced, scope, day_s)
         value_s = new_s
@@ -1930,7 +2503,7 @@ def main(argv=None):
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id>")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh")
         return 2
     try:
         # restore / rides / start-fresh are Termux recovery commands; they must
@@ -1997,7 +2570,15 @@ def main(argv=None):
             out = cmd_reject(argv[1])
             print(json.dumps(out, indent=1))
             return 0
-        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, call, approve, or reject)" % cmd, file=_sys.stderr)
+        if cmd == "morning-tick":
+            out = cmd_morning_tick()
+            print(json.dumps(out, indent=1))
+            return 0
+        if cmd == "evening-refresh":
+            out = cmd_evening_refresh()
+            print(json.dumps(out, indent=1))
+            return 0
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, call, approve, reject, morning-tick, or evening-refresh)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))

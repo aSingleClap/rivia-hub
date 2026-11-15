@@ -14,7 +14,9 @@
 #   rivia sched selftest   run the planner checks (must pass after any planner change)
 #   rivia sched google-login  sign in to Google (Calendar read + write, and Drive file backup)
 #   rivia sched events <day>  print primary-calendar events (today, tomorrow, weekday, or YYYY-MM-DD)
-#   rivia sched signin-check  check Google sign-in now (same check as the 05:30 ET timer)
+#   rivia sched signin-check  check Google sign-in now (same check as the auto_write_time timer)
+#   rivia sched morning-tick  run the morning tick now: sign-in, auto-write, propose tomorrow, backup
+#   rivia sched evening-refresh  re-plan tomorrow at/after 21:00 ET; supersede a stale proposal
 #   rivia sched settings [day]  print schedule settings (and the 17/15 seed if it has run)
 #   rivia sched start-fresh    unlock a new, empty scheduler.db (init-db); a second run is a no-op
 #   rivia sched rides          ride count in scheduler.db
@@ -274,7 +276,15 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py reject "$2"
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id>' ;;
+        morning-tick)
+            sched_code_and_python
+            "$py" rivia_sched.py morning-tick
+            ;;
+        evening-refresh)
+            sched_code_and_python
+            "$py" rivia_sched.py evening-refresh
+            ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh' ;;
     esac
 }
 
@@ -314,7 +324,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py test_write_day.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
