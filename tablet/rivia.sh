@@ -16,6 +16,8 @@
 #   rivia sched events <day>  print primary-calendar events (today, tomorrow, weekday, or YYYY-MM-DD)
 #   rivia sched signin-check  check Google sign-in now (same check as the 05:30 ET timer)
 #   rivia sched settings [day]  print schedule settings (and the 17/15 seed if it has run)
+#   rivia sched rides          ride count in scheduler.db
+#   rivia sched restore <file>  merge rides from a Drive copy (scheduler.db or scheduler.json); never drops any
 #   rivia logs      last lines of the server and tunnel logs
 #   rivia regs      what clients tried to sign in (and which redirects were refused)
 #   rivia revoke    kill switch: revoke every token (re-add the connector after)
@@ -184,7 +186,16 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py "$@"
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | settings [day] | settings-log' ;;
+        rides)
+            sched_code_and_python
+            "$py" rivia_sched.py rides
+            ;;
+        restore)
+            [ -n "${2:-}" ] || die 'usage: rivia sched restore <file>'
+            sched_code_and_python
+            "$py" rivia_sched.py restore "$2"
+            ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | settings [day] | settings-log | rides | restore <file>' ;;
     esac
 }
 
@@ -224,7 +235,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -263,5 +274,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
