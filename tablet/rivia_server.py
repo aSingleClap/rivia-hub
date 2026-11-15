@@ -3,7 +3,8 @@
 # Two doors, same OAuth gate (rivia_auth.py):
 #   /mcp      for Grok bots (OAuth sign-in): get_tablet_battery, post_reply
 #   /app/mcp  for the Rivia app (token from `python rivia_auth.py mint-app-token`):
-#             get_tablet_battery, ask_bot, check_reply
+#             get_tablet_battery, ask_bot, check_reply, plus scheduler tools from the
+#             tool table (step 2: ride_time). The bot door gets no scheduler tools.
 # The gate refuses an app token on /mcp and a bot token on /app/mcp, so the app can't
 # fake a bot's answer and a bot can't start other bots.
 import sys
@@ -85,6 +86,9 @@ def check_reply(ticket: str) -> dict:
 def public_app():
     """Both doors behind the OAuth layer. This is what the tunnel points at."""
     import rivia_auth
+    import rivia_tools
+    # Register row-built scheduler tools on the app door only, before http_app snapshots them.
+    rivia_tools.install_on(app_mcp, door="app")
     bot_inner = mcp.http_app(path="/mcp")
     # Mounted under /app, so served at /app/mcp. Stateless + plain JSON: the phone sends one
     # POST per call (no session, no event stream), which keeps the app's client tiny.

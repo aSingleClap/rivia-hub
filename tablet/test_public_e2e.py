@@ -5,7 +5,9 @@ Runs on a spare local port with throwaway secrets; never touches ~/rivia/auth.db
 import asyncio, base64, hashlib, os, secrets, socket, sys, tempfile, threading, time
 
 _salt = secrets.token_bytes(16)
-os.environ.update(RIVIA_DB=os.path.join(tempfile.mkdtemp(), "e2e.db"),
+_tmp = tempfile.mkdtemp()
+os.environ.update(RIVIA_DIR=os.path.join(_tmp, "rivia"),
+                  RIVIA_DB=os.path.join(_tmp, "e2e.db"),
                   RIVIA_ISSUER="https://mcp.rivia.observer",
                   RIVIA_JWT_KEY=secrets.token_hex(32),
                   RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),

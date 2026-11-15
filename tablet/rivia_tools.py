@@ -1,0 +1,181 @@
+# rivia_tools.py: the scheduler tool table and call log in scheduler.db.
+# Rows are built with Tool.from_tool and registered on a door. Step 2 seeds
+# only ride_time on the app door; there is no tool editing yet.
+import json
+import time
+
+from fastmcp.tools import Tool
+from fastmcp.tools.tool_transform import ArgTransform
+
+import rivia_planner as rp
+import rivia_sched as sched
+
+CALL_LIMIT = 500
+
+SCHEMA = """
+create table if not exists tools(
+    name text not null, door text not null, action text not null,
+    preset text not null default '{}', description text not null,
+    model integer not null default 1, enabled integer not null default 1,
+    updated text not null, primary key (door, name));
+create table if not exists calls(
+    ts text not null, door text not null, tool text not null,
+    action text not null, ok integer not null, code text, ms integer not null);
+"""
+
+RIDE_TIME_SEED_DESCRIPTION = sched.RIDE_TIME_DESCRIPTION
+
+# Seeded on first start, only for actions that exist now (G5).
+SEED = (
+    {"name": "ride_time", "door": "app", "action": "sched.ride_time",
+     "preset": {}, "description": RIDE_TIME_SEED_DESCRIPTION, "model": 1, "enabled": 1},
+)
+
+_installed: set[str] = set()
+
+
+def append_fixed_lines(description, action):
+    parts = [description.strip(), sched.FAIL_RULE]
+    info = sched.ACTIONS.get(action) or {}
+    if info.get("time_bearing"):
+        parts.append("Say times exactly as their spoken value, never work one out, "
+                     "say every must_say fact, offer decisions_for_jordan and never pick one.")
+    return " ".join(parts)
+
+
+def ensure_schema(con):
+    con.executescript(SCHEMA)
+
+
+def seed_tools(con):
+    now = rp.iso(rp.now_s())
+    for row in SEED:
+        con.execute(
+            "insert or ignore into tools(name, door, action, preset, description, model, enabled, updated) "
+            "values(?,?,?,?,?,?,?,?)",
+            (row["name"], row["door"], row["action"], json.dumps(row["preset"], separators=(",", ":")),
+             row["description"], 1 if row["model"] else 0, 1 if row["enabled"] else 0, now),
+        )
+
+
+def open_db():
+    con = rp.db_open()
+    ensure_schema(con)
+    seed_tools(con)
+    return con
+
+
+def log_call(door, tool, action, ok, code, ms):
+    con = open_db()
+    try:
+        con.execute(
+            "insert into calls(ts, door, tool, action, ok, code, ms) values(?,?,?,?,?,?,?)",
+            (rp.iso(rp.now_s()), door, tool, action, 1 if ok else 0, code, int(ms)),
+        )
+        con.execute(
+            "delete from calls where rowid not in (select rowid from calls order by rowid desc limit ?)",
+            (CALL_LIMIT,),
+        )
+    finally:
+        con.close()
+
+
+def _transforms(action, preset):
+    info = sched.ACTIONS[action]
+    out = {}
+    for py, pub in info["py_params"].items():
+        if pub in (preset or {}):
+            out[py] = ArgTransform(name=pub, hide=True, default=preset[pub])
+        else:
+            out[py] = ArgTransform(name=pub)
+    # Ignore unknown preset keys here; editing validation comes later.
+    return out or None
+
+
+def tool_from_row(row):
+    action = row["action"]
+    if action not in sched.ACTIONS:
+        raise KeyError("unknown action: %s" % action)
+    info = sched.ACTIONS[action]
+    preset = row["preset"]
+    if isinstance(preset, str):
+        preset = json.loads(preset or "{}")
+    desc = append_fixed_lines(row["description"], action)
+    return Tool.from_tool(
+        info["fn"],
+        name=row["name"],
+        description=desc,
+        transform_args=_transforms(action, preset),
+    )
+
+
+def _wrap_logged(tool, door, name, action):
+    orig = tool.run
+
+    async def run(arguments):
+        t0 = time.perf_counter()
+        ok, code = False, "internal"
+        try:
+            result = await orig(arguments)
+            data = result.structured_content or {}
+            if isinstance(data, dict):
+                ok = bool(data.get("ok"))
+                err = data.get("error") or {}
+                code = None if ok else err.get("code")
+            else:
+                ok, code = True, None
+            return result
+        except Exception:
+            ok, code = False, "internal"
+            raise
+        finally:
+            try:
+                log_call(door, name, action, ok, code, int((time.perf_counter() - t0) * 1000))
+            except Exception:  # noqa: BLE001
+                pass
+
+    tool.run = run
+    return tool
+
+
+def load_rows(door=None, enabled_only=True):
+    con = open_db()
+    try:
+        q = "select name, door, action, preset, description, model, enabled, updated from tools"
+        args = []
+        where = []
+        if door is not None:
+            where.append("door=?")
+            args.append(door)
+        if enabled_only:
+            where.append("enabled=1")
+        if where:
+            q += " where " + " and ".join(where)
+        q += " order by name"
+        rows = []
+        for r in con.execute(q, args):
+            rows.append({"name": r[0], "door": r[1], "action": r[2], "preset": r[3],
+                         "description": r[4], "model": bool(r[5]), "enabled": bool(r[6]),
+                         "updated": r[7]})
+        return rows
+    finally:
+        con.close()
+
+
+def install_on(mcp, door):
+    """Build row tools for this door and add them to the FastMCP server. Idempotent per door."""
+    if door in _installed:
+        return
+    # Selftest is checked on every action; running it here fills the cache and meta.
+    sched.selftest_ok()
+    for row in load_rows(door=door, enabled_only=True):
+        if row["action"] not in sched.ACTIONS:
+            continue
+        t = _wrap_logged(tool_from_row(row), row["door"], row["name"], row["action"])
+        mcp.add_tool(t)
+    _installed.add(door)
+
+
+def reset_install():
+    """Allow tests to install onto a fresh FastMCP app in the same process."""
+    _installed.clear()
