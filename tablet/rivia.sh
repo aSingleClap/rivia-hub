@@ -2,6 +2,8 @@
 # rivia.sh: run RIVIA's MCP server on the tablet (Termux).
 #
 # One-time setup (Termux):
+#   bash ~/storage/shared/rivia/rivia.sh install-cli
+#   (puts `rivia` on PATH as $PREFIX/bin/rivia). Or:
 #   echo "alias rivia='bash ~/storage/shared/rivia/rivia.sh'" >> ~/.bashrc && source ~/.bashrc
 #
 # Then:
@@ -16,6 +18,7 @@
 #   rivia restart   stop + start (do this after editing any .py file)
 #   rivia setup     make new secrets in ~/.rivia/.env (only if you have none)
 #   rivia token     make the Rivia app's token (replaces the old one)
+#   rivia install-cli  put `rivia` on PATH ($PREFIX/bin on Termux, else ~/.local/bin)
 #   rivia ask BOT "request"   ask a bot through its webhook and wait for its post_reply
 
 CODE="$HOME/storage/shared/rivia"   # the code you edit
@@ -157,14 +160,38 @@ sched() {
     esac
 }
 
+# Symlink tablet/rivia onto PATH. Idempotent (ln -sfn). Termux: $PREFIX/bin;
+# elsewhere ~/.local/bin.
+install_cli() {
+    local here dest dir
+    here="$(cd "$(dirname "$0")" && pwd)"
+    [ -f "$here/rivia" ] || die "can't see $here/rivia"
+    if [ -n "${PREFIX:-}" ]; then
+        dir="$PREFIX/bin"
+    else
+        dir="$HOME/.local/bin"
+    fi
+    mkdir -p "$dir"
+    dest="$dir/rivia"
+    ln -sfn "$here/rivia" "$dest"
+    echo "installed $dest -> $here/rivia"
+    case ":$PATH:" in
+        *":$dir:"*) ;;
+        *) echo "note: $dir is not on PATH yet; add it (Termux already has \$PREFIX/bin)." ;;
+    esac
+}
+
 case "${1:-}" in
     start)   start ;;
     stop)    stop ;;
     restart) stop; sleep 1; start ;;
     status)  status ;;
     watch-loop) watch_loop ;;
-    test)    load_venv; cd "$CODE" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py; do
+    test)    load_venv
+             here="$(cd "$(dirname "$0")" && pwd)"
+             if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
+             cd "$testdir" || exit 1
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -183,6 +210,7 @@ case "${1:-}" in
              else rm -f "$HOME/.rivia/.env.new"; die "setup failed; nothing saved"; fi ;;
     token)   load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-app-token "${2:-365}" ;;
     sched)   sched "${2:-}" ;;
+    install-cli) install_cli ;;
     ask)     [ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'usage: rivia ask ard "What does tomorrow look like? Don'"'"'t write anything."'
              load_venv; load_env; cd "$CODE" || exit 1
              python - "$2" "$3" <<'PYEOF'
@@ -202,5 +230,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

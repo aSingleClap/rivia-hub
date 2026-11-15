@@ -19,6 +19,7 @@ def free_port():
 
 HOOK_PORT = free_port()
 os.environ.update(
+    RIVIA_DIR=os.path.join(TMP, "rivia"),
     RIVIA_DB=os.path.join(TMP, "auth.db"), RIVIA_MAILBOX_DB=os.path.join(TMP, "mailbox.db"),
     RIVIA_ISSUER="https://mcp.rivia.observer", RIVIA_JWT_KEY=secrets.token_hex(32),
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
@@ -103,7 +104,7 @@ async def refused(url, token):
 async def main():
     A, B = BASE + "/app/mcp", BASE + "/mcp"
     at, bt = await tools(A, APP), await tools(B, BOT)
-    ok(set(at) == {"get_tablet_battery", "ask_bot", "check_reply"}, "app door lists ask_bot, check_reply, battery")
+    ok(set(at) == {"get_tablet_battery", "ask_bot", "check_reply", "ride_time"}, "app door lists ask_bot, check_reply, battery, ride_time")
     ok("ard: Scheduling" in at["ask_bot"].description, "ask_bot tells Gemini which bots exist and what they do")
     ok("first person" in at["ask_bot"].description and "never naming the bot" in at["ask_bot"].description,
        "ask_bot tells Gemini to speak as Rivia, never naming the bot")
@@ -159,7 +160,7 @@ async def main():
             return r.headers.get("content-type", ""), json.loads(r.read())
     ctype, listed = raw("tools/list", {})
     ok(ctype.startswith("application/json") and {t["name"] for t in listed["result"]["tools"]} ==
-       {"get_tablet_battery", "ask_bot", "check_reply"}, "plain POST tools/list works with no session (app client)")
+       {"get_tablet_battery", "ask_bot", "check_reply", "ride_time"}, "plain POST tools/list works with no session (app client)")
     _, res = raw("tools/call", {"name": "check_reply", "arguments": {"ticket": ticket}})
     sc = res["result"].get("structuredContent") or json.loads(res["result"]["content"][0]["text"])
     ok(sc.get("status") == "answered" and sc.get("reply") == envelope, "plain POST tools/call returns the answer as JSON")
