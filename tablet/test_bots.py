@@ -104,7 +104,7 @@ async def refused(url, token):
 async def main():
     A, B = BASE + "/app/mcp", BASE + "/mcp"
     at, bt = await tools(A, APP), await tools(B, BOT)
-    ok(set(at) == {"get_tablet_battery", "ask_bot", "check_reply", "ride_time"}, "app door lists ask_bot, check_reply, battery, ride_time")
+    ok(set(at) == {"get_tablet_battery", "ask_bot", "check_reply", "ride_time", "plan_day"}, "app door lists ask_bot, check_reply, battery, ride_time, plan_day")
     ok("ard: Scheduling" in at["ask_bot"].description, "ask_bot tells Gemini which bots exist and what they do")
     ok("first person" in at["ask_bot"].description and "never naming the bot" in at["ask_bot"].description,
        "ask_bot tells Gemini to speak as Rivia, never naming the bot")
@@ -160,7 +160,7 @@ async def main():
             return r.headers.get("content-type", ""), json.loads(r.read())
     ctype, listed = raw("tools/list", {})
     ok(ctype.startswith("application/json") and {t["name"] for t in listed["result"]["tools"]} ==
-       {"get_tablet_battery", "ask_bot", "check_reply", "ride_time"}, "plain POST tools/list works with no session (app client)")
+       {"get_tablet_battery", "ask_bot", "check_reply", "ride_time", "plan_day"}, "plain POST tools/list works with no session (app client)")
     _, res = raw("tools/call", {"name": "check_reply", "arguments": {"ticket": ticket}})
     sc = res["result"].get("structuredContent") or json.loads(res["result"]["content"][0]["text"])
     ok(sc.get("status") == "answered" and sc.get("reply") == envelope, "plain POST tools/call returns the answer as JSON")
