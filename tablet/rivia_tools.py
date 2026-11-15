@@ -1,6 +1,5 @@
 # rivia_tools.py: the scheduler tool table and call log in scheduler.db.
-# Rows are built with Tool.from_tool and registered on a door. Step 2 seeds
-# only ride_time on the app door; there is no tool editing yet.
+# Rows are built with Tool.from_tool and registered on a door. Seeded on the app door as actions ship (G5). plan_week has no seeded row; there is no tool editing yet.
 import json
 import time
 
@@ -29,6 +28,8 @@ RIDE_TIME_SEED_DESCRIPTION = sched.RIDE_TIME_DESCRIPTION
 SEED = (
     {"name": "ride_time", "door": "app", "action": "sched.ride_time",
      "preset": {}, "description": RIDE_TIME_SEED_DESCRIPTION, "model": 1, "enabled": 1},
+    {"name": "plan_day", "door": "app", "action": "sched.plan_day",
+     "preset": {}, "description": sched.PLAN_DAY_DESCRIPTION, "model": 1, "enabled": 1},
 )
 
 _installed: set[str] = set()

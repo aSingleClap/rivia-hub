@@ -586,8 +586,49 @@ def _open_browser(url):
     return False
 
 
-def list_events(day: date):
-    time_min, time_max = day_window(day)
+# Auth failures that mean the owner needs to sign in again.
+AUTH_FAIL_CODES = frozenset({"calendar_login_expired", "calendar_token", "no_refresh_token"})
+NOTICE_DAY_KEY = "gcal_login_notice_day"
+
+
+def is_auth_failure(err):
+    if not isinstance(err, GcalError):
+        return False
+    if err.code in AUTH_FAIL_CODES:
+        return True
+    return "invalid_grant" in str(err).lower()
+
+
+def record_calendar_auth_failure(err, now=None):
+    """Remember an auth/refresh failure from a calendar read (the same read
+    plan_day uses, and that the 5:30 AM auto-write job should call later).
+
+    At most one record per New York day. There is no existing unsolicited
+    server-to-app message path (the app only collects ask_bot tickets via
+    check_reply), so this does not invent a new channel. It returns whether
+    this is the first failure today so a later notifier can hook in.
+    """
+    if not is_auth_failure(err):
+        return {"first_today": False, "reason": "not_auth"}
+    day = (now or datetime.now(TZ)).date().isoformat()
+    try:
+        import rivia_planner as rp
+        con = rp.db_open()
+        try:
+            last = rp.get_meta(con, NOTICE_DAY_KEY)
+            if last == day:
+                return {"first_today": False, "reason": "already_today", "day": day}
+            rp.set_meta(con, NOTICE_DAY_KEY, day)
+            rp.set_meta(con, "gcal_login_notice", FIX_LOGIN)
+            return {"first_today": True, "reason": "recorded", "day": day, "fix": FIX_LOGIN}
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return {"first_today": True, "reason": "no_db", "fix": FIX_LOGIN}
+
+
+def list_events_between(time_min, time_max):
+    """Read primary events in [time_min, time_max). time_* are RFC3339 strings."""
     token, tokens = access_token()
     items = []
     page = None
@@ -637,6 +678,29 @@ def list_events(day: date):
         if ev:
             events.append(ev)
     return events
+
+
+def list_events(day: date):
+    time_min, time_max = day_window(day)
+    return list_events_between(time_min, time_max)
+
+
+def events_for_plan(first_day: date, last_day: date, *, before=2, after=2, now=None):
+    """Primary events from `before` days before first_day to `after` days after last_day.
+
+    This is the calendar read plan_day / plan_week use, and the same read the
+    5:30 AM ET auto-write job (step 7b, not built yet) should use. Auth and
+    refresh failures are recorded at most once per day.
+    """
+    start = first_day - timedelta(days=before)
+    end = last_day + timedelta(days=after + 1)
+    tmin = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=TZ).isoformat()
+    tmax = datetime(end.year, end.month, end.day, 0, 0, 0, tzinfo=TZ).isoformat()
+    try:
+        return list_events_between(tmin, tmax)
+    except GcalError as e:
+        record_calendar_auth_failure(e, now=now)
+        raise
 
 
 def cmd_events(day_arg, now=None):
