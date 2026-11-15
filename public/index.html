@@ -10,6 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
+
     /* Rivia sleek UI (the "Rivia — sleek UI" canvas): true black, flat surfaces,
        white as the only accent, amber/red for status only, Inter throughout. */
     :root {
@@ -26,6 +27,7 @@
       --faint: #8F8F8F;
       --warn: #F2B84B;
       --error: #FF6B6B;
+      --ok: #EDEDED;
       --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
       --tap: 44px;
@@ -43,13 +45,12 @@
     }
     :focus-visible { outline: 2px solid var(--bright); outline-offset: 2px; }
 
-    /* ---------- header ---------- */
     header {
       display: flex; align-items: center; justify-content: space-between; gap: 1rem;
       height: 64px; padding: 0 12px 0 20px;
     }
     .logo { font-size: 17px; font-weight: 600; letter-spacing: 0.03em; }
-    nav { display: flex; gap: 4px; align-items: center; }
+    nav { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .nav-link {
       height: 36px; padding: 0 14px;
       border: 1px solid transparent; border-radius: 18px;
@@ -59,13 +60,12 @@
     .nav-link:hover { color: var(--text); }
     .nav-link.active { background: var(--fill); color: var(--text); }
 
-    /* ---------- page ---------- */
     main { max-width: 760px; margin: 0 auto; padding: 8px 20px 48px; }
 
-    /* The one bold element: Rivia's particle sphere, reacting to server status. */
     .hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 8px 0 28px; }
     #sphere { width: 180px; height: 180px; display: block; margin-bottom: 18px; }
     h1 { font-size: 22px; font-weight: 500; color: var(--bright); margin-bottom: 4px; }
+    h2 { font-size: 16px; font-weight: 600; margin: 0 0 12px; }
     .subtitle { color: var(--muted); font-size: 14px; }
     .wizard-head { padding: 16px 0 24px; }
     .wizard-head .subtitle { margin-top: 2px; }
@@ -78,19 +78,16 @@
       margin-bottom: 12px;
     }
 
-    /* ---------- status ---------- */
     .status-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
     .status-name { font-size: 16px; font-weight: 600; }
     .status-word { margin-left: auto; color: var(--muted); font-size: 13px; }
 
-    /* ok = white dot, idle/stopped = amber ring, error = red diamond */
     .status-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #FFFFFF; box-shadow: 0 0 8px rgba(255,255,255,0.6); }
     .status-dot.idle, .status-dot.stopped { width: 9px; height: 9px; background: transparent; border: 1.5px solid var(--warn); box-shadow: none; }
     .status-dot.error { width: 8px; height: 8px; border-radius: 1px; background: var(--error); box-shadow: none; transform: rotate(45deg); }
 
     .controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 
-    /* ---------- buttons ---------- */
     .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: var(--tap); padding: 0 18px;
@@ -102,6 +99,9 @@
     .btn-primary:hover, .btn-primary:active { background: #FFFFFF; }
     .btn-secondary { background: var(--fill); color: var(--text); }
     .btn-secondary:hover, .btn-secondary:active { background: var(--fill-2); }
+    .btn-danger { background: var(--fill); color: var(--error); }
+    .btn-danger:hover { background: var(--fill-2); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .info { color: var(--muted); font-size: 14px; }
     .meta { font-family: var(--mono); font-size: 12px; color: var(--faint); margin-top: 6px; overflow-wrap: anywhere; }
@@ -115,7 +115,6 @@
     .conn-status.ok { color: var(--text); }
     .conn-status.error { color: var(--error); border-color: rgba(255,107,107,0.35); }
 
-    /* ---------- rows (drawer style) ---------- */
     .rows { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
     .row {
       display: flex; align-items: center; gap: 14px; width: 100%;
@@ -128,12 +127,11 @@
     .row > svg { flex: none; color: var(--muted); }
     .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
     .row-title { font-size: 15px; font-weight: 500; }
-    .row-sub { font-size: 12px; color: var(--faint); }
-    .soon { flex: none; font-size: 12px; color: var(--faint); }
+    .row-sub { font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+    .badge { flex: none; font-size: 12px; color: var(--bright); background: var(--fill-3); border-radius: 999px; padding: 2px 8px; }
 
-    /* ---------- wizard ---------- */
-    .wizard, .tools-view { display: none; }
-    .wizard.active, .tools-view.active { display: block; }
+    .page-view, .wizard { display: none; }
+    .page-view.active, .wizard.active { display: block; }
 
     .steps { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
     .step { height: 32px; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 16px; background: var(--fill); color: var(--muted); font-size: 13px; font-weight: 500; }
@@ -143,14 +141,16 @@
     label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 500; }
     .hint { font-size: 12px; color: var(--faint); margin-top: 6px; }
 
-    input, select {
-      width: 100%; height: 52px; padding: 0 18px;
+    input, select, textarea {
+      width: 100%; padding: 0 18px;
       border: 1px solid transparent; border-radius: 26px;
       background: var(--fill); color: var(--text);
       font: 400 15px var(--font);
     }
-    input::placeholder { color: var(--faint); }
-    input:focus, select:focus { outline: none; border-color: rgba(255,255,255,0.5); }
+    input, select { height: 52px; }
+    textarea { min-height: 80px; padding: 14px 18px; border-radius: 18px; resize: vertical; }
+    input::placeholder, textarea::placeholder { color: var(--faint); }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: rgba(255,255,255,0.5); }
     #serverUrl, #token { font-family: var(--mono); font-size: 14px; }
 
     .review-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
@@ -159,6 +159,36 @@
 
     .wizard-actions { display: flex; justify-content: space-between; margin-top: 20px; gap: 8px; }
     .hidden { display: none; }
+
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 16px; font-size: 14px; }
+    .kv dt { color: var(--faint); }
+    .kv dd { color: var(--text); overflow-wrap: anywhere; }
+
+    .group-title { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .setting {
+      display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px;
+      padding: 12px 0; border-top: 1px solid var(--line);
+    }
+    .setting .meta { margin-top: 0; }
+    .setting-fields { flex: 1; min-width: 180px; }
+    .pin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .setting .btn { height: 40px; padding: 0 14px; }
+
+    .pending-item, .log-item {
+      padding: 14px 0;
+      border-top: 1px solid var(--line);
+    }
+    .pending-item:first-child, .log-item:first-child { border-top: 0; }
+    .pending-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+
+    table.logs { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.logs th, table.logs td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    table.logs th { color: var(--faint); font-weight: 500; }
+    table.logs td { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+    .ok-yes { color: var(--text); }
+    .ok-no { color: var(--error); }
+
   </style>
 </head>
 <body>
@@ -166,12 +196,15 @@
     <span class="logo">Server Hub</span>
     <nav>
       <button type="button" class="nav-link active" id="nav-dashboard" onclick="showView('dashboard')">Home</button>
+      <button type="button" class="nav-link" id="nav-status" onclick="showView('status')">Status</button>
+      <button type="button" class="nav-link" id="nav-settings" onclick="showView('settings')">Settings</button>
+      <button type="button" class="nav-link" id="nav-pending" onclick="showView('pending')">Pending</button>
+      <button type="button" class="nav-link" id="nav-logs" onclick="showView('logs')">Logs</button>
       <button type="button" class="nav-link" id="nav-tools" onclick="showView('tools')">Tools</button>
-      <button type="button" class="nav-link" id="nav-wizard" onclick="showView('wizard')">Add Server</button>
+      <button type="button" class="nav-link" id="nav-wizard" onclick="showView('wizard')">Connect</button>
     </nav>
   </header>
 
-  <!-- Dashboard / Home -->
   <main id="view-dashboard">
     <section class="hero">
       <canvas id="sphere" aria-hidden="true"></canvas>
@@ -186,63 +219,116 @@
         <span class="status-word" id="statusText">Not configured</span>
       </div>
       <div class="controls">
-        <button type="button" class="btn btn-primary" onclick="testConnection()">Test Connection</button>
-        <button type="button" class="btn btn-secondary" onclick="setStatus('running')">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"></path></svg>Start
-        </button>
-        <button type="button" class="btn btn-secondary" onclick="setStatus('stopped')">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>Stop
-        </button>
-        <button type="button" class="btn btn-secondary" onclick="restart()">
+        <button type="button" class="btn btn-secondary" onclick="testConnection()">Test Connection</button>
+        <button type="button" class="btn btn-primary" id="restartBtn" onclick="restart()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v5h-5"></path></svg>Restart
         </button>
       </div>
-      <div class="info" id="infoText">Configure your server to get started.</div>
+      <div class="info" id="infoText">Connect with an admin token to see Status, Settings, Pending, and Logs.</div>
       <div class="meta" id="serverMeta">URL: not set</div>
       <div id="connStatus" class="conn-status hidden"></div>
+      <dl class="kv" id="statusPreview" style="margin-top:16px;"></dl>
     </div>
 
     <div class="card rows" role="list">
+      <button type="button" class="row" role="listitem" onclick="showView('status')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v4l3 2"></path></svg>
+        <span class="row-text"><span class="row-title">Status</span><span class="row-sub">Selftest, Google sign-in, clock, last backup, battery.</span></span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="showView('settings')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"></path></svg>
+        <span class="row-text"><span class="row-title">Settings</span><span class="row-sub">Standing values and place pins, applied at once.</span></span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="showView('pending')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"></path></svg>
+        <span class="row-text"><span class="row-title">Pending</span><span class="row-sub">Approve or reject standing changes and writes. Shows who asked.</span></span>
+        <span class="badge hidden" id="pendingBadge"></span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="showView('logs')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"></path></svg>
+        <span class="row-text"><span class="row-title">Logs</span><span class="row-sub">Recent tool calls from the tablet (no arguments or results).</span></span>
+      </button>
       <button type="button" class="row" role="listitem" onclick="showView('tools')">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6.5a4 4 0 0 0 5 5L13 18a2.1 2.1 0 0 1-3-3z"></path><path d="M10 15l-4.5 4.5"></path></svg>
-        <span class="row-text"><span class="row-title">Tools</span><span class="row-sub">View and manage the tools this server exposes to Rivia.</span></span>
-      </button>
-      <button type="button" class="row" role="listitem" onclick="alert('Logs coming next')">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"></path></svg>
-        <span class="row-text"><span class="row-title">Logs</span><span class="row-sub">See recent activity from the server.</span></span>
-        <span class="soon">Soon</span>
+        <span class="row-text"><span class="row-title">Tools</span><span class="row-sub">Admin-door tools and the scheduler action catalog.</span></span>
       </button>
       <button type="button" class="row" role="listitem" onclick="showView('wizard')">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path><circle cx="16" cy="7" r="2"></circle><circle cx="8" cy="17" r="2"></circle></svg>
-        <span class="row-text"><span class="row-title">Connection</span><span class="row-sub">Update URL, token, or reconfigure the tunnel.</span></span>
-      </button>
-      <button type="button" class="row" role="listitem" onclick="alert('Info library coming next')">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"></path><path d="M3 13l9 5 9-5"></path></svg>
-        <span class="row-text"><span class="row-title">Learn</span><span class="row-sub">Explanations of MCP concepts at different levels.</span></span>
-        <span class="soon">Soon</span>
+        <span class="row-text"><span class="row-title">Connection</span><span class="row-sub">Tunnel URL and admin token (token stays in this tab only).</span></span>
       </button>
     </div>
   </main>
 
-  <!-- Tools View -->
-  <main id="view-tools" class="tools-view">
+  <main id="view-status" class="page-view">
+    <div class="wizard-head">
+      <h1>Status</h1>
+      <p class="subtitle">Live reading from hub_status on the admin door.</p>
+    </div>
+    <div class="controls">
+      <button type="button" class="btn btn-secondary" onclick="loadStatus()">Refresh</button>
+    </div>
+    <div class="card" id="statusCard">
+      <div class="empty" id="statusEmpty">Connect with an admin token to see status.</div>
+      <dl class="kv hidden" id="statusKv"></dl>
+    </div>
+  </main>
+
+  <main id="view-settings" class="page-view">
+    <div class="wizard-head">
+      <h1>Settings</h1>
+      <p class="subtitle">Standing values, including place pins. Changes here apply at once.</p>
+    </div>
+    <div class="controls">
+      <button type="button" class="btn btn-secondary" onclick="loadSettings()">Refresh</button>
+    </div>
+    <div class="card" id="settingsCard">
+      <div class="empty">Connect with an admin token to see and change settings.</div>
+    </div>
+  </main>
+
+  <main id="view-pending" class="page-view">
+    <div class="wizard-head">
+      <h1>Pending</h1>
+      <p class="subtitle">Approve or reject queued changes. A standing change from Labs applies only after Approve.</p>
+    </div>
+    <div class="controls">
+      <button type="button" class="btn btn-secondary" onclick="loadPending()">Refresh</button>
+    </div>
+    <div class="card" id="pendingCard">
+      <div class="empty">Connect with an admin token to see the queue.</div>
+    </div>
+  </main>
+
+  <main id="view-logs" class="page-view">
+    <div class="wizard-head">
+      <h1>Logs</h1>
+      <p class="subtitle">Recent tool calls. Arguments, results, and event titles are never logged.</p>
+    </div>
+    <div class="controls">
+      <button type="button" class="btn btn-secondary" onclick="loadLogs()">Refresh</button>
+    </div>
+    <div class="card" id="logsCard">
+      <div class="empty">Connect with an admin token to see logs.</div>
+    </div>
+  </main>
+
+  <main id="view-tools" class="page-view">
     <div class="wizard-head">
       <h1>Tools</h1>
-      <p class="subtitle">Tools currently exposed by the server.</p>
+      <p class="subtitle">Tools on the admin door, plus the scheduler action catalog.</p>
     </div>
-    <div class="controls" style="margin-bottom:16px;">
+    <div class="controls">
       <button type="button" class="btn btn-secondary" onclick="loadTools()">Refresh</button>
     </div>
     <div id="toolsList" class="card" style="padding:8px;">
-      <div class="info" style="padding:16px;">Loading tools…</div>
+      <div class="info" style="padding:16px;">Connect with an admin token to list tools.</div>
     </div>
   </main>
 
-  <!-- Wizard -->
   <main id="view-wizard" class="wizard">
     <div class="wizard-head">
-      <h1>Add MCP Server</h1>
-      <p class="subtitle">Connect via your Cloudflare tunnel.</p>
+      <h1>Connect</h1>
+      <p class="subtitle">Point this page at the tablet tunnel and paste the admin token.</p>
     </div>
 
     <div class="steps">
@@ -255,7 +341,7 @@
       <div class="form-group">
         <label for="serverUrl">Server URL</label>
         <input type="text" id="serverUrl" value="https://mcp.rivia.observer" placeholder="https://mcp.rivia.observer" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false">
-        <div class="hint">Your Cloudflare tunnel address.</div>
+        <div class="hint">The Cloudflare tunnel origin. The hub calls /admin/mcp and polls /health on this host.</div>
       </div>
       <div class="form-group">
         <label for="serverName">Server name</label>
@@ -269,9 +355,9 @@
 
     <div class="card hidden" id="step-2">
       <div class="form-group">
-        <label for="token">Access token (optional)</label>
-        <input type="password" id="token" placeholder="Bearer token if required" autocomplete="off">
-        <div class="hint">Stored only in this browser session for now.</div>
+        <label for="token">Admin token</label>
+        <input type="password" id="token" placeholder="Paste the token from rivia admin-token" autocomplete="off">
+        <div class="hint">Kept only in this browser tab (sessionStorage). It is never written to localStorage, this page, or Cloudflare. Clear it when you close the tab, or use Disconnect.</div>
       </div>
       <div class="form-group">
         <label for="serverDesc">Short description</label>
@@ -288,13 +374,13 @@
       <div id="reviewContent" class="review"></div>
       <div class="wizard-actions">
         <button type="button" class="btn btn-secondary" onclick="prevStep(2)">Back</button>
-        <button type="button" class="btn btn-primary" onclick="finishWizard()">Save & Test</button>
+        <button type="button" class="btn btn-danger" onclick="disconnectToken()">Disconnect</button>
+        <button type="button" class="btn btn-primary" onclick="finishWizard()">Save &amp; Connect</button>
       </div>
     </div>
   </main>
 
   <script>
-
     // ---------- particle sphere (same idea as the app's home sphere, drawn on one canvas) ----------
     const sphere = (() => {
       const cv = document.getElementById('sphere');
@@ -350,14 +436,39 @@
       if (reduce) { angle = 0.6; draw(0); } else requestAnimationFrame(frame);
       return { set(m) { mode = MODES[m] || MODES.idle; if (reduce) { spin = mode.spin; glow = mode.glow; draw(0); } } };
     })();
+
+    const TOKEN_KEY = 'hub_token';
+    const HEALTH_POLL_MS = 2000;
+    const HEALTH_WAIT_MS = 90000;
+
     let config = {
       url: localStorage.getItem('hub_url') || 'https://mcp.rivia.observer',
       name: localStorage.getItem('hub_name') || 'Tab S7+ Server',
-      token: sessionStorage.getItem('hub_token') || '',
+      token: sessionStorage.getItem(TOKEN_KEY) || '',
       desc: localStorage.getItem('hub_desc') || ''
     };
 
-    // Status shapes follow the app: 'ok' = mint dot, 'idle'/'stopped' = amber ring, 'error' = red diamond.
+    function hasToken() {
+      return Boolean(config.token);
+    }
+
+    function originOf(url) {
+      try {
+        const u = new URL(url);
+        return u.origin;
+      } catch (e) {
+        return String(url || '').replace(/\/+$/, '');
+      }
+    }
+
+    function healthUrl() {
+      return originOf(config.url) + '/health';
+    }
+
+    function adminMcpUrl() {
+      return originOf(config.url) + '/admin/mcp';
+    }
+
     function setIndicator(kind, word) {
       document.getElementById('statusDot').className = kind === 'ok' ? 'status-dot' : 'status-dot ' + kind;
       document.getElementById('statusText').textContent = word;
@@ -372,25 +483,41 @@
 
     function loadConfig() {
       document.getElementById('serverTitle').textContent = config.name;
-      // Nothing has been checked yet, so this is a ring, not a mint dot.
-      setIndicator('idle', config.url ? 'Ready' : 'Not configured');
-      document.getElementById('serverMeta').textContent = config.url ? `URL: ${config.url}` : 'URL: not set';
+      setIndicator('idle', config.url ? (hasToken() ? 'Ready' : 'No token') : 'Not configured');
+      document.getElementById('serverMeta').textContent = config.url
+        ? ('URL: ' + config.url + '  ·  admin: ' + adminMcpUrl())
+        : 'URL: not set';
       document.getElementById('serverUrl').value = config.url;
       document.getElementById('serverName').value = config.name;
       document.getElementById('serverDesc').value = config.desc;
+      document.getElementById('token').value = config.token;
+      document.getElementById('infoText').textContent = hasToken()
+        ? 'Admin token is in this tab only. Status, Settings, Pending, and Logs will load from /admin/mcp.'
+        : 'Connect with an admin token to see Status, Settings, Pending, and Logs.';
+      document.getElementById('restartBtn').disabled = !hasToken();
+      if (!hasToken()) {
+        document.getElementById('statusPreview').innerHTML = '';
+        const badge = document.getElementById('pendingBadge');
+        badge.classList.add('hidden');
+        badge.textContent = '';
+      }
     }
 
     function showView(view) {
-      document.getElementById('view-dashboard').style.display = view === 'dashboard' ? 'block' : 'none';
-      document.getElementById('view-tools').classList.toggle('active', view === 'tools');
-      document.getElementById('view-wizard').classList.toggle('active', view === 'wizard');
-
-      document.getElementById('nav-dashboard').classList.toggle('active', view === 'dashboard');
-      document.getElementById('nav-tools').classList.toggle('active', view === 'tools');
-      document.getElementById('nav-wizard').classList.toggle('active', view === 'wizard');
-
+      const views = ['dashboard', 'status', 'settings', 'pending', 'logs', 'tools', 'wizard'];
+      for (const v of views) {
+        const el = document.getElementById('view-' + v);
+        if (v === 'dashboard') el.style.display = view === 'dashboard' ? 'block' : 'none';
+        else el.classList.toggle('active', view === v);
+        const nav = document.getElementById('nav-' + v);
+        if (nav) nav.classList.toggle('active', view === v);
+      }
       if (view === 'wizard') showStep(1);
       if (view === 'tools') loadTools();
+      if (view === 'status') loadStatus();
+      if (view === 'settings') loadSettings();
+      if (view === 'pending') loadPending();
+      if (view === 'logs') loadLogs();
     }
 
     function showStep(n) {
@@ -408,7 +535,8 @@
       const rows = [
         ['Name', document.getElementById('serverName').value],
         ['URL', document.getElementById('serverUrl').value],
-        ['Token', document.getElementById('token').value ? 'Provided' : 'None'],
+        ['Admin MCP', originOf(document.getElementById('serverUrl').value) + '/admin/mcp'],
+        ['Token', document.getElementById('token').value ? 'Provided (kept in this tab only)' : 'None — cards will stay empty'],
         ['Description', document.getElementById('serverDesc').value || '—']
       ];
       const box = document.getElementById('reviewContent');
@@ -432,123 +560,560 @@
       localStorage.setItem('hub_url', config.url);
       localStorage.setItem('hub_name', config.name);
       localStorage.setItem('hub_desc', config.desc);
-      if (config.token) sessionStorage.setItem('hub_token', config.token);
+      if (config.token) sessionStorage.setItem(TOKEN_KEY, config.token);
+      else sessionStorage.removeItem(TOKEN_KEY);
 
       loadConfig();
       showView('dashboard');
       testConnection();
+      if (hasToken()) refreshHome();
+    }
+
+    function disconnectToken() {
+      config.token = '';
+      sessionStorage.removeItem(TOKEN_KEY);
+      document.getElementById('token').value = '';
+      loadConfig();
+      document.getElementById('statusEmpty').classList.remove('hidden');
+      document.getElementById('statusKv').classList.add('hidden');
+      document.getElementById('statusKv').textContent = '';
+      document.getElementById('settingsCard').innerHTML = '<div class="empty">Connect with an admin token to see and change settings.</div>';
+      document.getElementById('pendingCard').innerHTML = '<div class="empty">Connect with an admin token to see the queue.</div>';
+      document.getElementById('logsCard').innerHTML = '<div class="empty">Connect with an admin token to see logs.</div>';
+      document.getElementById('toolsList').innerHTML = '<div class="info" style="padding:16px;">Connect with an admin token to list tools.</div>';
+      setConnStatus('Admin token cleared from this tab.', 'ok');
+      buildReview();
     }
 
     async function testConnection() {
       const infoEl = document.getElementById('infoText');
-
       if (!config.url) {
         setConnStatus('No server URL configured.');
         return;
       }
-
-      setConnStatus('Testing connection…');
+      setConnStatus('Testing /health…');
       sphere.set('busy');
-
       try {
-        const headers = { 'Content-Type': 'application/json' };
-        if (config.token) headers['Authorization'] = `Bearer ${config.token}`;
-
-        const res = await fetch(config.url, { method: 'GET', headers, mode: 'cors' });
-
-        if (res.ok || res.status === 401 || res.status === 405 || res.status === 404) {
-          setConnStatus(`Reachable (HTTP ${res.status}).`, 'ok');
-          setIndicator('ok', 'Reachable');
-          infoEl.textContent = 'Server is reachable via the tunnel.';
+        const res = await fetch(healthUrl(), { method: 'GET', mode: 'cors' });
+        if (res.ok) {
+          setConnStatus('Health is 200. ' + (hasToken() ? 'Loading admin status…' : 'Enter an admin token to open the cards.'), 'ok');
+          setIndicator('ok', hasToken() ? 'Reachable' : 'No token');
+          infoEl.textContent = hasToken()
+            ? 'Server is reachable. Loading status from /admin/mcp.'
+            : 'Server is reachable. Connect with an admin token to see Status, Settings, Pending, and Logs.';
+          if (hasToken()) await refreshHome();
         } else {
-          throw new Error(`HTTP ${res.status}`);
+          throw new Error('HTTP ' + res.status);
         }
       } catch (err) {
-        setConnStatus(`Failed: ${err.message}. Check CORS or URL.`, 'error');
+        setConnStatus('Failed: ' + err.message + '. Check CORS or the tunnel URL.', 'error');
         setIndicator('error', 'Unreachable');
-        infoEl.textContent = 'Could not reach the server.';
+        infoEl.textContent = 'Could not reach /health.';
+      }
+    }
+
+    async function mcpCall(name, args) {
+      if (!hasToken()) {
+        const err = new Error('no_token');
+        err.code = 'no_token';
+        throw err;
+      }
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + config.token
+      };
+      const body = {
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: { name: name, arguments: args || {} }
+      };
+      const res = await fetch(adminMcpUrl(), {
+        method: 'POST', headers, body: JSON.stringify(body), mode: 'cors'
+      });
+      if (res.status === 401 || res.status === 403) {
+        const err = new Error('Admin token was refused (HTTP ' + res.status + ').');
+        err.code = 'auth';
+        throw err;
+      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message || data.error);
+      const result = data.result || {};
+      const sc = result.structuredContent;
+      if (sc) return sc;
+      const text = result.content && result.content[0] && result.content[0].text;
+      if (text) {
+        try { return JSON.parse(text); } catch (e) { return { text: text }; }
+      }
+      return result;
+    }
+
+    async function mcpList() {
+      if (!hasToken()) {
+        const err = new Error('no_token');
+        err.code = 'no_token';
+        throw err;
+      }
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+        'Authorization': 'Bearer ' + config.token
+      };
+      const res = await fetch(adminMcpUrl(), {
+        method: 'POST', headers, mode: 'cors',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      });
+      if (res.status === 401 || res.status === 403) {
+        const err = new Error('Admin token was refused (HTTP ' + res.status + ').');
+        err.code = 'auth';
+        throw err;
+      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      return (data && data.result && data.result.tools) || [];
+    }
+
+    function fillKv(el, rows) {
+      el.textContent = '';
+      for (const [label, value] of rows) {
+        const dt = document.createElement('dt');
+        dt.textContent = label;
+        const dd = document.createElement('dd');
+        dd.textContent = value;
+        el.appendChild(dt);
+        el.appendChild(dd);
+      }
+    }
+
+    function statusRows(st) {
+      const rows = [];
+      if (st.time) rows.push(['Time', st.time + (st.tz ? ' ' + st.tz : '')]);
+      if ('selftest_ok' in st) rows.push(['Selftest', st.selftest_ok ? 'ok' : 'failed']);
+      if ('signed_in' in st) rows.push(['Google', st.signed_in ? (st.scopes_complete ? 'signed in, write scopes complete' : (st.needs_relogin ? 'signed in, needs re-login for write/Drive' : 'signed in')) : 'not signed in']);
+      if ('clock_ok' in st) rows.push(['Clock', st.clock_ok ? 'ok' : ('gap ' + st.clock_gap_s + 's')]);
+      if (st.last_backup) rows.push(['Last backup', st.last_backup]);
+      else rows.push(['Last backup', 'none recorded']);
+      if (st.battery) rows.push(['Battery', st.battery.battery_percent + '% ' + (st.battery.status || '')]);
+      return rows;
+    }
+
+    async function loadStatus() {
+      const empty = document.getElementById('statusEmpty');
+      const kv = document.getElementById('statusKv');
+      if (!hasToken()) {
+        empty.classList.remove('hidden');
+        empty.textContent = 'Connect with an admin token to see status.';
+        kv.classList.add('hidden');
+        kv.textContent = '';
+        return;
+      }
+      empty.textContent = 'Loading…';
+      empty.classList.remove('hidden');
+      kv.classList.add('hidden');
+      try {
+        const st = await mcpCall('hub_status', {});
+        empty.classList.add('hidden');
+        kv.classList.remove('hidden');
+        fillKv(kv, statusRows(st));
+        fillKv(document.getElementById('statusPreview'), statusRows(st));
+        setIndicator(st.ok === false || st.selftest_ok === false ? 'error' : 'ok', st.selftest_ok === false ? 'Selftest failed' : 'Running');
+      } catch (err) {
+        empty.classList.remove('hidden');
+        empty.textContent = err.code === 'no_token'
+          ? 'Connect with an admin token to see status.'
+          : ('Could not load status: ' + err.message);
+      }
+    }
+
+    function settingValue(item) {
+      const v = item.value;
+      if (v && typeof v === 'object' && 'lat' in v && 'lng' in v) return v;
+      return v;
+    }
+
+    function renderSettings(items) {
+      const card = document.getElementById('settingsCard');
+      card.textContent = '';
+      if (!items.length) {
+        card.innerHTML = '<div class="empty">No settings returned.</div>';
+        return;
+      }
+      const groups = [];
+      const seen = {};
+      for (const item of items) {
+        const k = String(item.key || '');
+        let g = item.group;
+        if (!g) {
+          if (k.startsWith('place.')) g = 'places';
+          else if (k.startsWith('ride_estimate.') || k.startsWith('gym_hours.') || item.day_change) g = 'schedule';
+          else g = 'system';
+        }
+        if (!seen[g]) { seen[g] = []; groups.push(g); }
+        seen[g].push(item);
+      }
+      for (const g of groups) {
+        const title = document.createElement('div');
+        title.className = 'group-title';
+        title.textContent = g;
+        card.appendChild(title);
+        for (const item of seen[g]) {
+          card.appendChild(renderSetting(item));
+        }
+      }
+    }
+
+    function renderSetting(item) {
+      const wrap = document.createElement('div');
+      wrap.className = 'setting';
+      const fields = document.createElement('div');
+      fields.className = 'setting-fields';
+      const label = document.createElement('label');
+      label.textContent = (item.label || item.key) + '  ·  ' + item.key;
+      fields.appendChild(label);
+      const val = settingValue(item);
+      let input;
+      if (item.unit === 'lat,lng' || (val && typeof val === 'object' && 'lat' in val)) {
+        const grid = document.createElement('div');
+        grid.className = 'pin-grid';
+        const lat = document.createElement('input');
+        lat.type = 'text'; lat.inputMode = 'decimal'; lat.placeholder = 'lat';
+        lat.value = val && val.lat != null ? String(val.lat) : '';
+        lat.dataset.field = 'lat';
+        const lng = document.createElement('input');
+        lng.type = 'text'; lng.inputMode = 'decimal'; lng.placeholder = 'lng';
+        lng.value = val && val.lng != null ? String(val.lng) : '';
+        lng.dataset.field = 'lng';
+        grid.appendChild(lat); grid.appendChild(lng);
+        fields.appendChild(grid);
+        input = grid;
+      } else {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.value = val == null ? '' : String(val);
+        fields.appendChild(input);
+      }
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const range = item.range && item.range[0] != null ? (' range ' + item.range[0] + '–' + item.range[1]) : '';
+      meta.textContent = (item.source || 'default') + (item.unit ? '  ·  ' + item.unit : '') + range;
+      fields.appendChild(meta);
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'btn btn-secondary';
+      save.textContent = 'Save';
+      save.addEventListener('click', async () => {
+        let value;
+        if (input.classList && input.classList.contains('pin-grid')) {
+          const lat = input.querySelector('[data-field="lat"]').value.trim();
+          const lng = input.querySelector('[data-field="lng"]').value.trim();
+          value = { lat: Number(lat), lng: Number(lng) };
+        } else {
+          value = input.value;
+        }
+        save.disabled = true;
+        try {
+          const out = await mcpCall('set_setting', { key: item.key, value: value, scope: 'standing' });
+          if (out && out.ok === false) throw new Error((out.error && (out.error.msg || out.error.code)) || 'refused');
+          await loadSettings();
+        } catch (err) {
+          meta.textContent = 'Could not save: ' + err.message;
+          save.disabled = false;
+        }
+      });
+      wrap.appendChild(fields);
+      wrap.appendChild(save);
+      return wrap;
+    }
+
+    async function loadSettings() {
+      const card = document.getElementById('settingsCard');
+      if (!hasToken()) {
+        card.innerHTML = '<div class="empty">Connect with an admin token to see and change settings.</div>';
+        return;
+      }
+      card.innerHTML = '<div class="empty">Loading…</div>';
+      try {
+        const out = await mcpCall('get_settings', { group: 'all' });
+        const items = (out && out.data && out.data.settings) || out.settings || [];
+        renderSettings(items);
+      } catch (err) {
+        card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see and change settings.' : ('Could not load settings: ' + err.message)) + '</div>';
+      }
+    }
+
+    function previewText(item) {
+      if (item.key && item.key !== 'write_day') {
+        return (item.old == null ? 'default' : String(typeof item.old === 'object' ? JSON.stringify(item.old) : item.old))
+          + ' → '
+          + (item.value == null ? '—' : String(typeof item.value === 'object' ? JSON.stringify(item.value) : item.value));
+      }
+      if (item.preview) {
+        try {
+          const p = typeof item.preview === 'string' ? JSON.parse(item.preview) : item.preview;
+          if (p && p.status) return 'write ' + (item.day || '') + ' (' + p.status + ')';
+        } catch (e) {}
+      }
+      return item.day ? ('day ' + item.day) : '';
+    }
+
+    function renderPending(items) {
+      const card = document.getElementById('pendingCard');
+      card.textContent = '';
+      const pending = (items || []).filter(c => c.status === 'pending');
+      const badge = document.getElementById('pendingBadge');
+      if (pending.length) {
+        badge.textContent = String(pending.length);
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+        badge.textContent = '';
+      }
+      if (!pending.length) {
+        card.innerHTML = '<div class="empty">Nothing is waiting for approval.</div>';
+        return;
+      }
+      for (const item of pending) {
+        const el = document.createElement('div');
+        el.className = 'pending-item';
+        const title = document.createElement('div');
+        title.className = 'row-title';
+        title.textContent = (item.key || item.kind || 'change') + (item.day ? '  ·  ' + item.day : '');
+        const sub = document.createElement('div');
+        sub.className = 'row-sub';
+        sub.textContent = 'asked by ' + (item.asked || item.door || 'unknown')
+          + (item.reason ? '  ·  ' + item.reason : '')
+          + (item.expires ? '  ·  expires ' + item.expires : '')
+          + (item.change_id ? '  ·  ' + item.change_id : '');
+        const prev = document.createElement('div');
+        prev.className = 'meta';
+        prev.textContent = previewText(item);
+        const actions = document.createElement('div');
+        actions.className = 'pending-actions';
+        const approve = document.createElement('button');
+        approve.type = 'button';
+        approve.className = 'btn btn-primary';
+        approve.textContent = 'Approve';
+        const reject = document.createElement('button');
+        reject.type = 'button';
+        reject.className = 'btn btn-danger';
+        reject.textContent = 'Reject';
+        approve.addEventListener('click', () => decideChange('approve_change', item.change_id, approve, reject));
+        reject.addEventListener('click', () => decideChange('reject_change', item.change_id, approve, reject));
+        actions.appendChild(approve);
+        actions.appendChild(reject);
+        el.appendChild(title);
+        el.appendChild(sub);
+        el.appendChild(prev);
+        el.appendChild(actions);
+        card.appendChild(el);
+      }
+    }
+
+    async function decideChange(tool, changeId, approveBtn, rejectBtn) {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      try {
+        const out = await mcpCall(tool, { change_id: changeId });
+        if (out && out.ok === false) throw new Error((out.error && (out.error.msg || out.error.code)) || 'refused');
+        await loadPending();
+      } catch (err) {
+        approveBtn.disabled = false;
+        rejectBtn.disabled = false;
+        alert(err.message);
+      }
+    }
+
+    async function loadPending() {
+      const card = document.getElementById('pendingCard');
+      if (!hasToken()) {
+        card.innerHTML = '<div class="empty">Connect with an admin token to see the queue.</div>';
+        document.getElementById('pendingBadge').classList.add('hidden');
+        return;
+      }
+      card.innerHTML = '<div class="empty">Loading…</div>';
+      try {
+        const out = await mcpCall('list_changes', { status: 'pending' });
+        const items = (out && out.data && out.data.changes) || out.changes || [];
+        renderPending(items);
+      } catch (err) {
+        card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see the queue.' : ('Could not load pending: ' + err.message)) + '</div>';
+      }
+    }
+
+    async function loadLogs() {
+      const card = document.getElementById('logsCard');
+      if (!hasToken()) {
+        card.innerHTML = '<div class="empty">Connect with an admin token to see logs.</div>';
+        return;
+      }
+      card.innerHTML = '<div class="empty">Loading…</div>';
+      try {
+        const out = await mcpCall('list_calls', { limit: 100 });
+        const rows = (out && out.calls) || [];
+        if (!rows.length) {
+          card.innerHTML = '<div class="empty">No calls recorded yet.</div>';
+          return;
+        }
+        const table = document.createElement('table');
+        table.className = 'logs';
+        table.innerHTML = '<thead><tr><th>When</th><th>Door</th><th>Tool</th><th>Action</th><th>Ok</th><th>Code</th><th>ms</th></tr></thead>';
+        const body = document.createElement('tbody');
+        for (const r of rows) {
+          const tr = document.createElement('tr');
+          const cells = [r.ts, r.door, r.tool, r.action, r.ok ? 'yes' : 'no', r.code || '', r.ms];
+          cells.forEach((c, i) => {
+            const td = document.createElement('td');
+            td.textContent = c == null ? '' : String(c);
+            if (i === 4) td.className = r.ok ? 'ok-yes' : 'ok-no';
+            tr.appendChild(td);
+          });
+          body.appendChild(tr);
+        }
+        table.appendChild(body);
+        card.textContent = '';
+        card.appendChild(table);
+      } catch (err) {
+        card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see logs.' : ('Could not load logs: ' + err.message)) + '</div>';
       }
     }
 
     async function loadTools() {
       const listEl = document.getElementById('toolsList');
-      listEl.innerHTML = '<div class="info" style="padding:16px;">Loading tools…</div>';
-
-      if (!config.url) {
-        listEl.innerHTML = '<div class="info" style="padding:16px;">No server configured. Add one first.</div>';
+      if (!hasToken()) {
+        listEl.innerHTML = '<div class="info" style="padding:16px;">Connect with an admin token to list tools.</div>';
         return;
       }
-
+      listEl.innerHTML = '<div class="info" style="padding:16px;">Loading tools…</div>';
       try {
-        const headers = {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        };
-        if (config.token) headers['Authorization'] = `Bearer ${config.token}`;
-
-        const body = {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/list',
-          params: {}
-        };
-
-        const res = await fetch(config.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          mode: 'cors'
-        });
-
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const data = await res.json();
-        const tools = data?.result?.tools || data?.tools || [];
-
-        if (!tools.length) {
-          listEl.innerHTML = '<div class="info" style="padding:16px;">No tools returned. The server may use a different endpoint or require a session.</div>';
+        const tools = await mcpList();
+        const catalog = await mcpCall('list_actions', {});
+        const actions = (catalog && catalog.actions) || [];
+        listEl.textContent = '';
+        if (!tools.length && !actions.length) {
+          listEl.innerHTML = '<div class="info" style="padding:16px;">No tools returned.</div>';
           return;
         }
-
-        listEl.innerHTML = tools.map(t => `
-          <div class="row" style="cursor:default;">
-            <div class="row-text">
-              <span class="row-title">${escapeHtml(t.name || 'Unnamed tool')}</span>
-              <span class="row-sub">${escapeHtml(t.description || 'No description')}</span>
-            </div>
-          </div>
-        `).join('');
+        const heading = document.createElement('div');
+        heading.className = 'group-title';
+        heading.style.padding = '8px 12px 0';
+        heading.textContent = 'Admin door';
+        listEl.appendChild(heading);
+        for (const t of tools) {
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.style.cursor = 'default';
+          const text = document.createElement('div');
+          text.className = 'row-text';
+          const title = document.createElement('span');
+          title.className = 'row-title';
+          title.textContent = t.name || 'Unnamed tool';
+          const sub = document.createElement('span');
+          sub.className = 'row-sub';
+          sub.textContent = t.description || 'No description';
+          text.appendChild(title);
+          text.appendChild(sub);
+          row.appendChild(text);
+          listEl.appendChild(row);
+        }
+        if (actions.length) {
+          const h2 = document.createElement('div');
+          h2.className = 'group-title';
+          h2.style.padding = '16px 12px 0';
+          h2.textContent = 'Actions';
+          listEl.appendChild(h2);
+          for (const a of actions) {
+            const row = document.createElement('div');
+            row.className = 'row';
+            row.style.cursor = 'default';
+            const text = document.createElement('div');
+            text.className = 'row-text';
+            const title = document.createElement('span');
+            title.className = 'row-title';
+            title.textContent = a.action;
+            const sub = document.createElement('span');
+            sub.className = 'row-sub';
+            sub.textContent = (a.doors || []).join(', ') + (a.description ? '  ·  ' + a.description : '');
+            text.appendChild(title);
+            text.appendChild(sub);
+            row.appendChild(text);
+            listEl.appendChild(row);
+          }
+        }
       } catch (err) {
-        listEl.innerHTML = `<div class="info" style="padding:16px; color:var(--error);">Could not load tools: ${escapeHtml(err.message)}<br><br>This usually means CORS is blocking the request, the URL is wrong, or the server expects a different MCP handshake.</div>`;
+        listEl.innerHTML = '<div class="info" style="padding:16px; color:var(--error);">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to list tools.' : ('Could not load tools: ' + err.message)) + '</div>';
       }
+    }
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    async function pollHealth(waitMs) {
+      const deadline = Date.now() + waitMs;
+      let lastErr = 'no reply';
+      while (Date.now() < deadline) {
+        await sleep(HEALTH_POLL_MS);
+        try {
+          const res = await fetch(healthUrl(), { method: 'GET', mode: 'cors' });
+          if (res.ok) return true;
+          lastErr = 'HTTP ' + res.status;
+        } catch (err) {
+          lastErr = err.message;
+        }
+      }
+      const err = new Error(lastErr);
+      err.code = 'health_timeout';
+      throw err;
+    }
+
+    async function restart() {
+      const info = document.getElementById('infoText');
+      const btn = document.getElementById('restartBtn');
+      if (!hasToken()) {
+        setConnStatus('Restart needs an admin token.', 'error');
+        return;
+      }
+      btn.disabled = true;
+      setIndicator('idle', 'Restarting…');
+      sphere.set('busy');
+      info.textContent = 'Calling restart_server, then polling /health…';
+      setConnStatus('Restart requested. Waiting for /health 200 (up to 90 s).');
+      try {
+        const out = await mcpCall('restart_server', {});
+        if (out && out.ok === false) throw new Error((out.error && (out.error.msg || out.error.code)) || 'restart refused');
+        await pollHealth(HEALTH_WAIT_MS);
+        setIndicator('ok', 'Running');
+        setConnStatus('Health is 200 again.', 'ok');
+        info.textContent = 'Server came back. Reloading status.';
+        await refreshHome();
+      } catch (err) {
+        setIndicator('error', 'Restart failed');
+        setConnStatus('Restart failed: ' + err.message, 'error');
+        info.textContent = err.code === 'health_timeout'
+          ? 'restart_server was called, but /health did not return 200 in time.'
+          : ('Could not restart: ' + err.message);
+      } finally {
+        btn.disabled = !hasToken();
+      }
+    }
+
+    async function refreshHome() {
+      if (!hasToken()) return;
+      try {
+        await Promise.all([loadStatus(), loadPending()]);
+      } catch (e) {}
     }
 
     function escapeHtml(str) {
       return String(str)
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>')
-        .replace(/"/g, '"');
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
     }
 
-    function setStatus(state) {
-      const info = document.getElementById('infoText');
-      if (state === 'running') {
-        setIndicator('ok', 'Running');
-        info.textContent = 'Marked as running.';
-      } else {
-        setIndicator('stopped', 'Stopped');
-        info.textContent = 'Marked as stopped.';
-      }
-    }
-
-    function restart() {
-      setStatus('stopped');
-      setTimeout(() => setStatus('running'), 500);
-    }
-
-    // Init
     loadConfig();
+    if (hasToken()) refreshHome();
   </script>
 </body>
 </html>
