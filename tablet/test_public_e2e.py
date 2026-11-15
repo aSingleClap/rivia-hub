@@ -11,7 +11,8 @@ os.environ.update(RIVIA_DIR=os.path.join(_tmp, "rivia"),
                   RIVIA_ISSUER="https://mcp.rivia.observer",
                   RIVIA_JWT_KEY=secrets.token_hex(32),
                   RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
-                  RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="))
+                  RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
+                  RIVIA_SIGNIN_CHECK="0")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import urllib.error, urllib.request
 import uvicorn

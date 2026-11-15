@@ -88,6 +88,9 @@ def public_app():
     import rivia_auth
     import rivia_tools
     # Register row-built scheduler tools on the app door only, before http_app snapshots them.
+    import asyncio
+    import rivia_gcal as gcal
+    from contextlib import suppress
     rivia_tools.install_on(app_mcp, door="app")
     bot_inner = mcp.http_app(path="/mcp")
     # Mounted under /app, so served at /app/mcp. Stateless + plain JSON: the phone sends one
@@ -99,7 +102,18 @@ def public_app():
         async with AsyncExitStack() as stack:
             await stack.enter_async_context(bot_inner.lifespan(app))
             await stack.enter_async_context(app_inner.lifespan(app))
-            yield
+            # G1-style daily timer (05:30 ET): Google sign-in check. The later
+            # 7b auto-write job can reuse run_signin_check / maybe_notify_signin_expired.
+            task = None
+            if gcal.signin_check_enabled():
+                task = asyncio.create_task(gcal.signin_check_loop(), name="rivia-signin-check")
+            try:
+                yield
+            finally:
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
 
     return rivia_auth.build_app(bot_inner, lifespan=lifespan, app_mcp=app_inner)
 

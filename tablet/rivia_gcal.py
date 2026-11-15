@@ -2,6 +2,7 @@
 #
 #   python rivia_gcal.py google-login
 #   python rivia_gcal.py events <day>
+#   python rivia_gcal.py signin-check
 #
 # Client id/secret come from the environment (rivia.sh loads ~/.rivia/.env).
 # The refresh token is saved to ~/.rivia/google_token.json, mode 600.
@@ -13,12 +14,14 @@
 # it cannot request Calendar scopes.
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -589,6 +592,13 @@ def _open_browser(url):
 # Auth failures that mean the owner needs to sign in again.
 AUTH_FAIL_CODES = frozenset({"calendar_login_expired", "calendar_token", "no_refresh_token"})
 NOTICE_DAY_KEY = "gcal_login_notice_day"
+CHECK_DAY_KEY = "gcal_signin_check_day"
+NOTIFY_TITLE = "Rivia"
+NOTIFY_CONTENT = "Google sign-in expired. Run rivia sched google-login"
+NOTIFY_TIMEOUT_S = 8
+DEFAULT_CHECK_HOUR = 5
+DEFAULT_CHECK_MINUTE = 30
+DEFAULT_CHECK_INTERVAL_S = 60
 
 
 def is_auth_failure(err):
@@ -603,10 +613,9 @@ def record_calendar_auth_failure(err, now=None):
     """Remember an auth/refresh failure from a calendar read (the same read
     plan_day uses, and that the 5:30 AM auto-write job should call later).
 
-    At most one record per New York day. There is no existing unsolicited
-    server-to-app message path (the app only collects ask_bot tickets via
-    check_reply), so this does not invent a new channel. It returns whether
-    this is the first failure today so a later notifier can hook in.
+    At most one record per New York day. Returns whether this is the first
+    failure today so a notifier can hook in (Termux notification, not the
+    phone app — there is no unsolicited app inbox).
     """
     if not is_auth_failure(err):
         return {"first_today": False, "reason": "not_auth"}
@@ -625,6 +634,175 @@ def record_calendar_auth_failure(err, now=None):
             con.close()
     except Exception:  # noqa: BLE001
         return {"first_today": True, "reason": "no_db", "fix": FIX_LOGIN}
+
+
+def post_signin_expired_notification():
+    """Post an Android notification via Termux:API. Never raises.
+
+    If termux-notification is missing (a dev box, or Termux:API not
+    installed), log and continue so the server stays up.
+    """
+    cmd = ["termux-notification", "--title", NOTIFY_TITLE, "--content", NOTIFY_CONTENT]
+    try:
+        r = subprocess.run(cmd, timeout=NOTIFY_TIMEOUT_S, capture_output=True)
+        if r.returncode != 0:
+            print("rivia: termux-notification failed (exit %s); continuing." % r.returncode,
+                  file=sys.stderr)
+            return {"ok": False, "reason": "exit", "code": r.returncode}
+        return {"ok": True}
+    except FileNotFoundError:
+        print("rivia: termux-notification not found; continuing.", file=sys.stderr)
+        return {"ok": False, "reason": "missing"}
+    except subprocess.TimeoutExpired:
+        print("rivia: termux-notification timed out; continuing.", file=sys.stderr)
+        return {"ok": False, "reason": "timeout"}
+    except Exception as e:  # noqa: BLE001
+        print("rivia: termux-notification failed (%s); continuing." % type(e).__name__,
+              file=sys.stderr)
+        return {"ok": False, "reason": "error"}
+
+
+def maybe_notify_signin_expired(err, now=None):
+    """Record an auth/refresh failure and, on the first one today, notify
+    via termux-notification. Safe for plan_day, the 05:30 sign-in check,
+    and the later 7b auto-write job. Never writes to the calendar.
+    """
+    rec = record_calendar_auth_failure(err, now=now)
+    if not rec.get("first_today"):
+        rec = dict(rec, notified=False)
+        return rec
+    sent = post_signin_expired_notification()
+    rec = dict(rec, notified=bool(sent.get("ok")), notify=sent)
+    return rec
+
+
+def _meta_get(key):
+    try:
+        import rivia_planner as rp
+        con = rp.db_open()
+        try:
+            return rp.get_meta(con, key)
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _meta_set(key, value):
+    import rivia_planner as rp
+    con = rp.db_open()
+    try:
+        rp.set_meta(con, key, value)
+    finally:
+        con.close()
+
+
+def last_signin_check_day():
+    return _meta_get(CHECK_DAY_KEY)
+
+
+def mark_signin_check_ran(day):
+    try:
+        _meta_set(CHECK_DAY_KEY, day)
+    except Exception:  # noqa: BLE001
+        print("rivia: could not record sign-in check day; continuing.", file=sys.stderr)
+
+
+def signin_check_at_hm():
+    raw = (os.environ.get("RIVIA_SIGNIN_CHECK_TIME") or "05:30").strip()
+    try:
+        h, m = raw.split(":")
+        h, m = int(h), int(m)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError(raw)
+        return h, m
+    except ValueError:
+        return DEFAULT_CHECK_HOUR, DEFAULT_CHECK_MINUTE
+
+
+def signin_check_due(now, last_ran_day=None, check_hour=None, check_minute=None):
+    """True if now is at or after today's 05:30 ET and today's run was missed."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TZ)
+    now = now.astimezone(TZ)
+    if check_hour is None or check_minute is None:
+        check_hour, check_minute = signin_check_at_hm()
+    cutoff = now.replace(hour=check_hour, minute=check_minute, second=0, microsecond=0)
+    if now < cutoff:
+        return False
+    last = last_ran_day if last_ran_day is not None else last_signin_check_day()
+    return last != now.date().isoformat()
+
+
+def signin_check_enabled():
+    return os.environ.get("RIVIA_SIGNIN_CHECK", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def plan_window(first_day, last_day, *, before=2, after=2):
+    start = first_day - timedelta(days=before)
+    end = last_day + timedelta(days=after + 1)
+    tmin = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=TZ).isoformat()
+    tmax = datetime(end.year, end.month, end.day, 0, 0, 0, tzinfo=TZ).isoformat()
+    return tmin, tmax
+
+
+def run_signin_check(now=None, *, mark_ran=True):
+    """Read the calendar just enough to refresh the token. Never writes.
+
+    On calendar_login_expired or any token/refresh error, notify via
+    termux-notification at most once per New York day (existing meta
+    record). The 7b auto-write job can call this, or call
+    maybe_notify_signin_expired after its own events_for_plan read.
+    Never raises; missing termux-notification is logged and ignored.
+    """
+    now = now or datetime.now(TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TZ)
+    now = now.astimezone(TZ)
+    today = now.date()
+    out = {"ok": True, "day": today.isoformat(), "notified": False, "written": False}
+    checked = False
+    try:
+        tmin, tmax = plan_window(today, today, before=0, after=0)
+        list_events_between(tmin, tmax)
+        out["message"] = "Google sign-in is valid."
+        out["status"] = clock_status()
+        checked = True
+    except GcalError as e:
+        rec = maybe_notify_signin_expired(e, now=now)
+        out["ok"] = False
+        out["error"] = {"code": e.code, "msg": str(e), "step": e.step}
+        out["notified"] = bool(rec.get("notified"))
+        out["status"] = clock_status()
+        checked = True
+    except Exception as e:  # noqa: BLE001
+        print("rivia: sign-in check failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["ok"] = False
+        out["error"] = {"code": "internal", "msg": type(e).__name__, "step": "calendar"}
+    if mark_ran and checked:
+        mark_signin_check_ran(today.isoformat())
+    return out
+
+
+async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
+    """G1-style timer: check once a minute, catch up on start if today's
+    05:30 ET run was missed (tablet was off). Cancelled on server shutdown.
+    """
+    get_now = get_now or (lambda: datetime.now(TZ))
+    sleep = sleep or asyncio.sleep
+    if interval_s is None:
+        interval_s = DEFAULT_CHECK_INTERVAL_S
+    while True:
+        try:
+            now = get_now()
+            if signin_check_due(now):
+                run_signin_check(now=now, mark_ran=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print("rivia: sign-in check failed (%s); continuing." % type(e).__name__,
+                  file=sys.stderr)
+        await sleep(interval_s)
 
 
 def list_events_between(time_min, time_max):
@@ -690,16 +868,13 @@ def events_for_plan(first_day: date, last_day: date, *, before=2, after=2, now=N
 
     This is the calendar read plan_day / plan_week use, and the same read the
     5:30 AM ET auto-write job (step 7b, not built yet) should use. Auth and
-    refresh failures are recorded at most once per day.
+    refresh failures are recorded and (once per day) notified via Termux.
     """
-    start = first_day - timedelta(days=before)
-    end = last_day + timedelta(days=after + 1)
-    tmin = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=TZ).isoformat()
-    tmax = datetime(end.year, end.month, end.day, 0, 0, 0, tzinfo=TZ).isoformat()
+    tmin, tmax = plan_window(first_day, last_day, before=before, after=after)
     try:
         return list_events_between(tmin, tmax)
     except GcalError as e:
-        record_calendar_auth_failure(e, now=now)
+        maybe_notify_signin_expired(e, now=now)
         raise
 
 
@@ -727,10 +902,20 @@ def cmd_google_login(argv):
     return google_login()
 
 
+def cmd_signin_check(now=None):
+    """Run the Google sign-in check now (does not wait for 05:30).
+
+    Does not mark the daily 05:30 run, so the in-server timer still
+    catches up or fires at 05:30. Notification is still at most once
+    per New York day.
+    """
+    return run_signin_check(now=now, mark_ran=False)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__ or "rivia_gcal.py google-login | events <day>")
+        print(__doc__ or "rivia_gcal.py google-login | events <day> | signin-check")
         return 2
     cmd = argv[0]
     try:
@@ -740,9 +925,11 @@ def main(argv=None):
             if len(argv) < 2:
                 raise GcalError("bad_day", "usage: rivia sched events <day>", step="input")
             out = cmd_events(argv[1])
+        elif cmd == "signin-check":
+            out = cmd_signin_check()
         else:
             raise GcalError("bad_command",
-                            "Unknown command: %s. Use google-login or events <day>." % cmd,
+                            "Unknown command: %s. Use google-login, events <day>, or signin-check." % cmd,
                             step="input")
         print(json.dumps(out, indent=1))
         return 0 if out.get("ok") else 1
