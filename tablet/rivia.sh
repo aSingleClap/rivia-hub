@@ -20,6 +20,8 @@
 #   rivia sched rides          ride count in scheduler.db
 #   rivia sched restore <file>  merge rides from a Drive copy (scheduler.db or scheduler.json); never drops any
 #   rivia sched backup         upload scheduler.db to Drive (same file each time); --force to push anyway
+#   rivia sched pin <place> <lat> <lng>  store a place pin (Termux); refuses a pin closer than 2× the geofence radius
+#   rivia sched call <tool> [json]  call an app-door tool locally (no phone)
 #   rivia logs      last lines of the server and tunnel logs
 #   rivia regs      what clients tried to sign in (and which redirects were refused)
 #   rivia revoke    kill switch: revoke every token (re-add the connector after)
@@ -202,7 +204,19 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py start-fresh
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh' ;;
+        pin)
+            [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ -n "${4:-}" ] || die 'usage: rivia sched pin <place> <lat> <lng>'
+            sched_code_and_python
+            "$py" rivia_sched.py pin "$2" "$3" "$4"
+            ;;
+        call)
+            [ -n "${2:-}" ] || die 'usage: rivia sched call <tool> [json]'
+            sched_code_and_python
+            args="${3:-}"
+            [ -n "$args" ] || args='{}'
+            "$py" rivia_sched.py call "$2" "$args"
+            ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json]' ;;
     esac
 }
 
@@ -242,7 +256,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -281,5 +295,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
