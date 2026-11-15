@@ -19,6 +19,7 @@ os.environ.update(
     RIVIA_ISSUER="https://mcp.rivia.observer", RIVIA_JWT_KEY=secrets.token_hex(32),
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
     RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
+    RIVIA_SIGNIN_CHECK="0",
 )
 sys.path.insert(0, HERE)
 
@@ -220,8 +221,7 @@ ok(first["first_today"] is False and first["reason"] == "already_today",
 # a non-auth error is ignored
 other = gcal.record_calendar_auth_failure(gcal.GcalError("calendar_http", "boom"), now=PLAN_NOW)
 ok(other["first_today"] is False and other["reason"] == "not_auth", "non-auth calendar errors are not notice-worthy")
-# There is no unsolicited app message path; the hook only records.
-# (check_reply only collects tickets the app already started with ask_bot.)
+# The sign-in notice is a Termux notification, tested in test_signin_check.py.
 
 # Restore a good token for any later MCP plan_day call
 fake_g.grant_error = None

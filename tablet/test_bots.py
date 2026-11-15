@@ -25,6 +25,7 @@ os.environ.update(
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
     RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
     RIVIA_BOTS="ard", RIVIA_BOT_ARD_URL="http://127.0.0.1:%d/hook" % HOOK_PORT, RIVIA_BOT_ARD_KEY="crsr_test_key",
+    RIVIA_SIGNIN_CHECK="0",
 )
 sys.path.insert(0, HERE)
 import uvicorn

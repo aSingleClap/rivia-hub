@@ -14,6 +14,7 @@
 #   rivia sched selftest   run the planner checks (must pass after any planner change)
 #   rivia sched google-login  sign in to Google Calendar (read-only) on the tablet
 #   rivia sched events <day>  print primary-calendar events (today, tomorrow, weekday, or YYYY-MM-DD)
+#   rivia sched signin-check  check Google sign-in now (same check as the 05:30 ET timer)
 #   rivia logs      last lines of the server and tunnel logs
 #   rivia regs      what clients tried to sign in (and which redirects were refused)
 #   rivia revoke    kill switch: revoke every token (re-add the connector after)
@@ -177,7 +178,8 @@ sched() {
             [ -n "${2:-}" ] || die 'usage: rivia sched events <day>'
             sched_gcal "$@"
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day>' ;;
+        signin-check) sched_gcal "$@" ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check' ;;
     esac
 }
 
@@ -217,7 +219,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -256,5 +258,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
