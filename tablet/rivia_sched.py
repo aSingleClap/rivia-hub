@@ -3,6 +3,7 @@
 # door tools with Tool.from_tool.
 import asyncio
 import json
+import re
 import os
 from datetime import datetime, timedelta
 from typing import Any, Union
@@ -278,6 +279,7 @@ SETTINGS = {
     "sleep_target_hours":    {"planner": "sleepTargetH",   "default": 8,    "min": 4,    "max": 10,   "type": "int",   "unit": "hours",   "label": "Sleep target",             "day": True,  "ask": True,  "group": "schedule"},
     "place_radius_meters":   {"planner": "placeRadiusM",   "default": 400,  "min": 50,   "max": 2000, "type": "int",   "unit": "meters",  "label": "Place radius",             "day": False, "ask": False, "group": "system"},
     "geofence_radius_meters":{"planner": None,             "default": 150,  "min": 100,  "max": 400,  "type": "int",   "unit": "meters",  "label": "Geofence radius",          "day": False, "ask": False, "group": "system", "doors": ("termux", "admin")},
+    "auto_write_time":       {"planner": None,             "default": "05:30","min": "03:00","max": "09:00","type": "time",  "unit": "time",    "label": "Auto-write time",          "day": False, "ask": False, "group": "system", "doors": ("termux", "admin")},
     "overnight_hours":       {"planner": "overnightH",     "default": 8,    "min": 4,    "max": 16,   "type": "int",   "unit": "hours",   "label": "Overnight horizon",        "day": False, "ask": False, "group": "system"},
     "home_lookahead_hours":  {"planner": "homeLookaheadH", "default": 20,   "min": 8,    "max": 36,   "type": "int",   "unit": "hours",   "label": "Home lookahead",           "day": False, "ask": False, "group": "system"},
     "learn_keep_rides":      {"planner": "learnKeep",      "default": 10,   "min": 3,    "max": 50,   "type": "int",   "unit": "rides",   "label": "Learned rides to keep",    "day": False, "ask": False, "group": "system"},
@@ -294,10 +296,12 @@ GYM_HOUR_FIELDS = {
     "weekend_open": "weekendOpen", "weekend_close": "weekendClose",
 }
 SEED_ESTIMATES = (("ride_estimate.farm_pf", 17), ("ride_estimate.hmc_pf", 15))
-STANDING_UNAVAILABLE = "Standing setting changes need approval, which is not available yet."
 DAY_WINDOW_DAYS = 14
 DUPLICATE_S = 60
 UNDO_S = 24 * 3600
+PENDING_EXPIRE_S = 24 * 3600
+PENDING_LINE = "A pending result has not happened yet."
+PENDING_MESSAGE = "waiting for approval"
 
 GET_SETTINGS_DESCRIPTION = (
     "Jordan's schedule settings for a day: each key's value, default, unit, range, "
@@ -306,7 +310,8 @@ GET_SETTINGS_DESCRIPTION = (
 CHANGE_SETTING_DESCRIPTION = (
     "Change one of Jordan's schedule settings. scope is day (that date only, today "
     "through 14 days ahead) or standing. A standing change from this door is not "
-    "applied. Out-of-range or inconsistent values are refused with the reason."
+    "applied until it is approved; the reply is pending. A pending result has not "
+    "happened yet. Out-of-range or inconsistent values are refused with the reason."
 )
 UNDO_CHANGE_DESCRIPTION = (
     "Undo a schedule setting change. With no change_id, undo the latest change made "
@@ -378,6 +383,30 @@ def _load_value(text):
             return float(text)
 
 
+def _coerce_time(spec, value):
+    s = str(value).strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        raise SettingsError(
+            "bad_value", "Expected a time as HH:MM (for example 05:30).", step="input",
+        )
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise SettingsError(
+            "bad_value", "Expected a time as HH:MM (for example 05:30).", step="input",
+        )
+    text = "%02d:%02d" % (hour, minute)
+    lo, hi = spec.get("min"), spec.get("max")
+    if (lo and text < lo) or (hi and text > hi):
+        raise SettingsError(
+            "out_of_range",
+            "%s must be between %s and %s (got %s)."
+            % (spec.get("label") or "This setting", lo, hi, text),
+            step="settings",
+        )
+    return text
+
+
 def _coerce(spec, value):
     typ = spec["type"]
     if typ == "pin":
@@ -390,6 +419,8 @@ def _coerce(spec, value):
         if not parsed:
             raise SettingsError("bad_value", "A pin needs lat and lng.", step="input")
         return {"lat": parsed["lat"], "lng": parsed["lng"]}
+    if typ == "time":
+        return _coerce_time(spec, value)
     if typ == "int":
         if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("true", "false")):
             raise SettingsError("bad_value", "Expected a whole number.", step="input")
@@ -756,6 +787,61 @@ def _row_to_result(row, *, duplicate=False, in_use=None):
     return data
 
 
+def _asked_of(door):
+    d = (door or "").strip().lower()
+    if d in ("app", "admin"):
+        return d
+    return "system"
+
+
+def _row_created_s(row):
+    try:
+        return rp.to_epoch(row[1], "created")
+    except Exception:
+        return 0
+
+
+def _expires_iso(row):
+    return rp.iso(_row_created_s(row) + PENDING_EXPIRE_S)
+
+
+def _is_expired(row, now_s):
+    return _row_created_s(row) + PENDING_EXPIRE_S <= now_s
+
+
+def expire_pending(con, now_s):
+    """Mark pending rows older than 24 hours as expired. Returns how many flipped."""
+    rows = list(con.execute("select * from changes where status='pending'"))
+    n = 0
+    decided = rp.iso(now_s)
+    for row in rows:
+        if _is_expired(row, now_s):
+            con.execute("update changes set status='expired', decided=? where change_id=?",
+                        (decided, row[0]))
+            n += 1
+    return n
+
+
+def _find_pending(con, door, key, value_s, scope, day, request_id, now_s):
+    expire_pending(con, now_s)
+    if request_id:
+        row = con.execute(
+            "select * from changes where request_id=? and status='pending' "
+            "order by created desc, rowid desc limit 1",
+            (request_id,),
+        ).fetchone()
+        if row:
+            return row
+    day_s = day or ""
+    row = con.execute(
+        "select * from changes where status='pending' and door=? and key=? and new=? "
+        "and ifnull(scope,'')=? and ifnull(day,'')=? "
+        "order by created desc, rowid desc limit 1",
+        (door, key, value_s, scope or "", day_s),
+    ).fetchone()
+    return row
+
+
 def _find_duplicate(con, door, key, value_s, scope, day, request_id, now_s):
     if request_id:
         row = con.execute(
@@ -772,6 +858,39 @@ def _find_duplicate(con, door, key, value_s, scope, day, request_id, now_s):
         (door, key, value_s, scope or "", day_s, since),
     ).fetchone()
     return row
+
+
+def _pending_result(con, row, *, duplicate=False):
+    data = _setting_result(
+        con, row[6], row[5], row[4], row[0],
+        _load_value(row[7]) if row[7] is not None else None,
+        _load_value(row[8]) if row[8] is not None else None,
+        duplicate=duplicate, status=row[10],
+    )
+    data["asked"] = _asked_of(row[2])
+    data["expires"] = _expires_iso(row)
+    data["reason"] = row[12]
+    return data
+
+
+def _change_public(row):
+    return {
+        "change_id": row[0],
+        "created": row[1],
+        "door": row[2],
+        "asked": _asked_of(row[2]),
+        "kind": row[3],
+        "scope": row[4],
+        "day": row[5],
+        "key": row[6],
+        "old": _load_value(row[7]) if row[7] is not None else None,
+        "value": _load_value(row[8]) if row[8] is not None else None,
+        "status": row[10],
+        "decided": row[11],
+        "reason": row[12],
+        "request_id": row[13],
+        "expires": _expires_iso(row) if row[10] in ("pending", "expired") else None,
+    }
 
 
 def _ride_in_use(a, b):
@@ -809,8 +928,8 @@ def _setting_result(con, key, day, scope, change_id, old, value, duplicate=False
 def change_setting_sync(key, value, scope, day=None, reason=None, request_id=None,
                         door="app", now=None, con=None):
     """Run the four checks and, if they pass, apply a day change or a standing
-    change from a door that may apply one. App-door standing changes are refused
-    (G7) until the 7b queue exists."""
+    change from a door that may apply one. App-door standing changes are queued
+    as pending (G7) until approved."""
     close = False
     if con is None:
         con = rp.db_open()
@@ -869,10 +988,12 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
             "This setting cannot be changed from the %s door." % door,
             step="input",
         )
-    if door == "app" and scope == "standing":
-        raise SettingsError("standing_not_available", STANDING_UNAVAILABLE, step="settings")
     if door == "app" and not spec.get("ask", True) and not spec["day"]:
         raise SettingsError("bad_key", "This setting cannot be changed from the app door.", step="input")
+
+    pending = _find_pending(con, door, key, value_s, scope, day_s, request_id, now_s)
+    if pending:
+        return _pending_result(con, pending, duplicate=True)
 
     dup = _find_duplicate(con, door, key, value_s, scope, day_s, request_id, now_s)
     if dup:
@@ -901,9 +1022,20 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
             step="settings", extra={"samples": added, "problems": flat},
         )
 
-    # Check 4: log, then apply.
+    # Check 4: log, then apply — or queue as pending for an app-door standing change (G7).
     change_id = _new_id()
     created = rp.iso(now_s)
+    if door == "app" and scope == "standing":
+        _log_change(con, change_id=change_id, created=created, door=door, kind="setting",
+                    scope=scope, day=day_s, key=key, old=_store_value(old) if old is not None else None,
+                    new=value_s, preview=json.dumps({"asked": _asked_of(door)}),
+                    status="pending", decided=None, reason=reason, request_id=request_id)
+        data = _setting_result(con, key, day_s, scope, change_id, old, coerced,
+                               duplicate=False, status="pending")
+        data["asked"] = _asked_of(door)
+        data["expires"] = rp.iso(now_s + PENDING_EXPIRE_S)
+        data["reason"] = reason
+        return data
     if scope == "standing":
         con.execute(
             "insert or replace into settings(key, value, updated, change_id) values(?,?,?,?)",
@@ -965,11 +1097,16 @@ def _undo_change(con, change_id=None, door="app", now=None):
     cid, created, row_door, kind, scope, day_s, key, old_s, new_s, preview, status, decided, reason, request_id = row
     if status != "applied":
         raise SettingsError("bad_change", "Change %s cannot be undone (status is %s)." % (cid, status), step="settings")
-    # Undoing a standing change through the app door is itself standing, so refuse until 7b.
-    if scope == "standing" and door == "app":
-        raise SettingsError("standing_not_available", STANDING_UNAVAILABLE, step="settings")
+    # Undoing a standing change through the app door is itself a standing change,
+    # so it goes pending until approved.
     old = _load_value(old_s) if old_s is not None else None
     if scope == "standing":
+        if door == "app":
+            restore = old if old is not None else _parse_key(key).get("default")
+            out = _change_setting(con, key, restore, "standing", reason="undo %s" % cid,
+                                  door=door, now=now)
+            out["undo_of"] = cid
+            return out
         if old is None:
             con.execute("delete from settings where key=?", (key,))
         else:
@@ -1137,6 +1274,8 @@ def change_setting_tool(key: str, scope: str, value: Union[str, int, float],
                                    request_id=request_id, door="app")
         data, alerts, message = maybe_refresh_alerts(data)
         kind = "change" if data.get("status") == "applied" else "pending"
+        if data.get("status") == "pending":
+            message = message or PENDING_MESSAGE
         return ok_reply(kind, data, ref=data.get("change_id"),
                         message=message, alerts=alerts)
     except SettingsError as e:
@@ -1587,6 +1726,170 @@ ACTIONS = {
 
 
 
+def _load_change(con, change_id):
+    cid = (change_id or "").strip()
+    if not cid:
+        raise SettingsError("bad_change_id", "A change_id is required.", step="input")
+    row = con.execute("select * from changes where change_id=?", (cid,)).fetchone()
+    if not row:
+        raise SettingsError("bad_change_id", "No change with id %s." % cid, step="input")
+    return row
+
+
+def _rerun_checks(con, key, coerced, scope, day_s):
+    extra = {key: coerced}
+    resolved = _all_resolved(con, day=day_s, extra=extra)
+    problems = _consistency_problems(resolved)
+    if problems:
+        raise SettingsError("inconsistent", problems[0], step="settings", extra={"problems": problems})
+    added = _dry_run(con, day_s, extra)
+    if added:
+        flat = []
+        for item in added:
+            flat.extend(item["problems"])
+        raise SettingsError(
+            "breaks_plan",
+            "That change would add problems on a sample day: %s" % " ".join(flat),
+            step="settings", extra={"samples": added, "problems": flat},
+        )
+
+
+def approve_change_sync(change_id, now=None, con=None):
+    """Re-run every check and apply a pending change once. A repeat is refused."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+        expire_pending(con, now_s)
+        # Re-read after expiry so a stale pending shows as expired.
+        row = _load_change(con, change_id)
+        cid, created, door, kind, scope, day_s, key, old_s, new_s, preview, status, decided, reason, request_id = row
+        if status == "applied":
+            raise SettingsError("already_approved", "Change %s has already been approved." % cid, step="settings")
+        if status == "expired":
+            raise SettingsError("expired", "Change %s has expired." % cid, step="settings")
+        if status != "pending":
+            raise SettingsError("not_pending", "Change %s cannot be approved (status is %s)." % (cid, status),
+                                step="settings")
+        coerced = _load_value(new_s)
+        _rerun_checks(con, key, coerced, scope, day_s)
+        value_s = new_s
+        created_s = rp.iso(now_s)
+        if scope == "standing":
+            con.execute(
+                "insert or replace into settings(key, value, updated, change_id) values(?,?,?,?)",
+                (key, value_s, created_s, cid),
+            )
+        else:
+            if not day_s:
+                raise SettingsError("bad_change", "Change %s has no day to apply." % cid, step="settings")
+            con.execute(
+                "insert or replace into overrides(day, key, value, created, change_id) values(?,?,?,?,?)",
+                (day_s, key, value_s, created_s, cid),
+            )
+        con.execute("update changes set status='applied', decided=? where change_id=?", (created_s, cid))
+        data = _setting_result(con, key, day_s, scope, cid,
+                               _load_value(old_s) if old_s is not None else None,
+                               coerced, duplicate=False, status="applied")
+        data["asked"] = _asked_of(door)
+        data["reason"] = reason
+        data["approved"] = True
+        spec = _parse_key(key)
+        if spec["family"] == "place" and spec.get("field") == "pin":
+            data["places_file"] = rewrite_places_file(con)
+        return data
+    finally:
+        if close:
+            con.close()
+
+
+def reject_change_sync(change_id, now=None, con=None):
+    """Reject a pending change. Values stay as they are."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+        expire_pending(con, now_s)
+        row = _load_change(con, change_id)
+        cid, created, door, kind, scope, day_s, key, old_s, new_s, preview, status, decided, reason, request_id = row
+        if status == "rejected":
+            raise SettingsError("already_rejected", "Change %s has already been rejected." % cid, step="settings")
+        if status == "expired":
+            raise SettingsError("expired", "Change %s has expired." % cid, step="settings")
+        if status != "pending":
+            raise SettingsError("not_pending", "Change %s cannot be rejected (status is %s)." % (cid, status),
+                                step="settings")
+        decided_s = rp.iso(now_s)
+        con.execute("update changes set status='rejected', decided=? where change_id=?", (decided_s, cid))
+        return {
+            "change_id": cid, "key": key, "scope": scope, "day": day_s,
+            "old": _load_value(old_s) if old_s is not None else None,
+            "value": _load_value(new_s) if new_s is not None else None,
+            "status": "rejected", "asked": _asked_of(door), "reason": reason,
+        }
+    finally:
+        if close:
+            con.close()
+
+
+def list_changes_sync(status=None, now=None, con=None, limit=100):
+    """Pending and recent changes. Expired pending items are marked expired. Includes who asked."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        now = now or datetime.now(gcal.TZ)
+        now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+        expire_pending(con, now_s)
+        try:
+            limit_n = int(limit)
+        except (TypeError, ValueError):
+            limit_n = 100
+        if limit_n < 1:
+            limit_n = 1
+        if limit_n > 500:
+            limit_n = 500
+        want = (status or "").strip().lower() or None
+        if want:
+            rows = list(con.execute(
+                "select * from changes where status=? order by created desc, rowid desc limit ?",
+                (want, limit_n),
+            ))
+        else:
+            rows = list(con.execute(
+                "select * from changes order by created desc, rowid desc limit ?",
+                (limit_n,),
+            ))
+        return {"changes": [_change_public(r) for r in rows]}
+    finally:
+        if close:
+            con.close()
+
+
+def cmd_approve(change_id):
+    out = approve_change_sync(change_id)
+    out = dict(out)
+    out["ok"] = True
+    return out
+
+
+def cmd_reject(change_id):
+    out = reject_change_sync(change_id)
+    out = dict(out)
+    out["ok"] = True
+    return out
+
+
 def cmd_rides():
     """Ride count in scheduler.db. Termux only; no door or tool."""
     con = rp.db_open()
@@ -1627,7 +1930,7 @@ def main(argv=None):
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json]")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id>")
         return 2
     try:
         # restore / rides / start-fresh are Termux recovery commands; they must
@@ -1680,7 +1983,21 @@ def main(argv=None):
             finally:
                 con.close()
             return 0
-        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, or call)" % cmd, file=_sys.stderr)
+        if cmd == "approve":
+            if len(argv) < 2:
+                print("usage: rivia sched approve <change_id>", file=_sys.stderr)
+                return 2
+            out = cmd_approve(argv[1])
+            print(json.dumps(out, indent=1))
+            return 0
+        if cmd == "reject":
+            if len(argv) < 2:
+                print("usage: rivia sched reject <change_id>", file=_sys.stderr)
+                return 2
+            out = cmd_reject(argv[1])
+            print(json.dumps(out, indent=1))
+            return 0
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, call, approve, or reject)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))

@@ -190,7 +190,7 @@ ok(status == 200, "admin token opens /admin/mcp")
 listed = json.loads(body)
 admin_names = {t["name"] for t in listed["result"]["tools"]}
 ok(admin_names == set(admin.ADMIN_TOOLS),
-   "admin door lists the seven fixed admin tools and nothing else")
+   "admin door lists the fixed admin tools and nothing else")
 
 # CORS: hub origin is allowed, another origin is not
 status, headers, _body = raw_post("/admin/mcp", ADMIN2, tools_list_body(),
