@@ -138,6 +138,9 @@
     .step.active { background: var(--bright); color: #000000; }
 
     .form-group { margin-bottom: 18px; }
+    .check-row { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0 4px; }
+    .check-row input { margin-top: 3px; }
+    .check-row label { font-weight: 500; cursor: pointer; }
     label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 500; }
     .hint { font-size: 12px; color: var(--faint); margin-top: 6px; }
 
@@ -220,6 +223,7 @@
       </div>
       <div class="controls">
         <button type="button" class="btn btn-secondary" onclick="testConnection()">Test Connection</button>
+        <button type="button" class="btn btn-secondary" onclick="forgetToken()">Forget token</button>
         <button type="button" class="btn btn-primary" id="restartBtn" onclick="restart()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v5h-5"></path></svg>Restart
         </button>
@@ -357,7 +361,11 @@
       <div class="form-group">
         <label for="token">Admin token</label>
         <input type="password" id="token" placeholder="Paste the token from rivia admin-token" autocomplete="off">
-        <div class="hint">Kept only in this browser tab (sessionStorage). It is never written to localStorage, this page, or Cloudflare. Clear it when you close the tab, or use Disconnect.</div>
+        <div class="check-row">
+          <input type="checkbox" id="rememberToken">
+          <label for="rememberToken">Remember on this device</label>
+        </div>
+        <div class="hint">Off by default: the token stays in this tab only (sessionStorage) and is not written to disk with the URL. If you check Remember, it is also kept in localStorage on this device until you Forget or Disconnect. It is never hardcoded or sent to Cloudflare with this page. An empty box on Save keeps the token already stored (a refresh must not wipe it).</div>
       </div>
       <div class="form-group">
         <label for="serverDesc">Short description</label>
@@ -374,6 +382,7 @@
       <div id="reviewContent" class="review"></div>
       <div class="wizard-actions">
         <button type="button" class="btn btn-secondary" onclick="prevStep(2)">Back</button>
+        <button type="button" class="btn btn-danger" onclick="forgetToken()">Forget</button>
         <button type="button" class="btn btn-danger" onclick="disconnectToken()">Disconnect</button>
         <button type="button" class="btn btn-primary" onclick="finishWizard()">Save &amp; Connect</button>
       </div>
@@ -438,15 +447,52 @@
     })();
 
     const TOKEN_KEY = 'hub_token';
+    const REMEMBER_KEY = 'hub_remember';
     const HEALTH_POLL_MS = 2000;
     const HEALTH_WAIT_MS = 90000;
+    const MCP_TIMEOUT_MS = 20000;
+    const MCP_PROTOCOL = '2025-03-26';
+
+    function rememberEnabled() {
+      return localStorage.getItem(REMEMBER_KEY) === '1';
+    }
+
+    function tokenFromStores() {
+      if (rememberEnabled()) {
+        return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
+      }
+      // sessionStorage only — do not fall back to a leftover localStorage token
+      // when Remember is off.
+      return sessionStorage.getItem(TOKEN_KEY) || '';
+    }
+
+    function persistToken(token, remember) {
+      if (remember) localStorage.setItem(REMEMBER_KEY, '1');
+      else localStorage.removeItem(REMEMBER_KEY);
+      if (token) {
+        sessionStorage.setItem(TOKEN_KEY, token);
+        if (remember) localStorage.setItem(TOKEN_KEY, token);
+        else localStorage.removeItem(TOKEN_KEY);
+      } else {
+        sessionStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(TOKEN_KEY);
+      }
+    }
+
+    function clearStoredToken() {
+      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_KEY);
+    }
 
     let config = {
       url: localStorage.getItem('hub_url') || 'https://mcp.rivia.observer',
       name: localStorage.getItem('hub_name') || 'Tab S7+ Server',
-      token: sessionStorage.getItem(TOKEN_KEY) || '',
+      token: tokenFromStores(),
       desc: localStorage.getItem('hub_desc') || ''
     };
+    let mcpSessionId = null;
+    let mcpInit = null;
 
     function hasToken() {
       return Boolean(config.token);
@@ -491,8 +537,12 @@
       document.getElementById('serverName').value = config.name;
       document.getElementById('serverDesc').value = config.desc;
       document.getElementById('token').value = config.token;
+      const rememberBox = document.getElementById('rememberToken');
+      if (rememberBox) rememberBox.checked = rememberEnabled();
       document.getElementById('infoText').textContent = hasToken()
-        ? 'Admin token is in this tab only. Status, Settings, Pending, and Logs will load from /admin/mcp.'
+        ? (rememberEnabled()
+          ? 'Admin token is remembered on this device. Status, Settings, Pending, and Logs will load from /admin/mcp.'
+          : 'Admin token is in this tab only. Status, Settings, Pending, and Logs will load from /admin/mcp.')
         : 'Connect with an admin token to see Status, Settings, Pending, and Logs.';
       document.getElementById('restartBtn').disabled = !hasToken();
       if (!hasToken()) {
@@ -536,7 +586,7 @@
         ['Name', document.getElementById('serverName').value],
         ['URL', document.getElementById('serverUrl').value],
         ['Admin MCP', originOf(document.getElementById('serverUrl').value) + '/admin/mcp'],
-        ['Token', document.getElementById('token').value ? 'Provided (kept in this tab only)' : 'None — cards will stay empty'],
+        ['Token', (document.getElementById('token').value || config.token) ? (document.getElementById('rememberToken') && document.getElementById('rememberToken').checked ? 'Provided (remembered on this device)' : 'Provided (kept in this tab unless you Forget)') : 'None — cards will stay empty'],
         ['Description', document.getElementById('serverDesc').value || '—']
       ];
       const box = document.getElementById('reviewContent');
@@ -554,14 +604,19 @@
     function finishWizard() {
       config.url = document.getElementById('serverUrl').value.trim();
       config.name = document.getElementById('serverName').value.trim() || 'Tab S7+ Server';
-      config.token = document.getElementById('token').value.trim();
+      const typed = document.getElementById('token').value.trim();
+      // A refresh often leaves a type=password field blank. Saving then must
+      // not remove a token already in sessionStorage / localStorage.
+      if (typed) config.token = typed;
       config.desc = document.getElementById('serverDesc').value.trim();
+      const remember = Boolean(document.getElementById('rememberToken') && document.getElementById('rememberToken').checked);
 
       localStorage.setItem('hub_url', config.url);
       localStorage.setItem('hub_name', config.name);
       localStorage.setItem('hub_desc', config.desc);
-      if (config.token) sessionStorage.setItem(TOKEN_KEY, config.token);
-      else sessionStorage.removeItem(TOKEN_KEY);
+      persistToken(config.token, remember);
+      mcpSessionId = null;
+      mcpInit = null;
 
       loadConfig();
       showView('dashboard');
@@ -569,20 +624,36 @@
       if (hasToken()) refreshHome();
     }
 
-    function disconnectToken() {
-      config.token = '';
-      sessionStorage.removeItem(TOKEN_KEY);
+    function clearCardState() {
       document.getElementById('token').value = '';
+      const rememberBox = document.getElementById('rememberToken');
+      if (rememberBox) rememberBox.checked = false;
+      mcpSessionId = null;
+      mcpInit = null;
       loadConfig();
       document.getElementById('statusEmpty').classList.remove('hidden');
       document.getElementById('statusKv').classList.add('hidden');
       document.getElementById('statusKv').textContent = '';
+      document.getElementById('statusPreview').innerHTML = '';
       document.getElementById('settingsCard').innerHTML = '<div class="empty">Connect with an admin token to see and change settings.</div>';
       document.getElementById('pendingCard').innerHTML = '<div class="empty">Connect with an admin token to see the queue.</div>';
       document.getElementById('logsCard').innerHTML = '<div class="empty">Connect with an admin token to see logs.</div>';
       document.getElementById('toolsList').innerHTML = '<div class="info" style="padding:16px;">Connect with an admin token to list tools.</div>';
-      setConnStatus('Admin token cleared from this tab.', 'ok');
       buildReview();
+    }
+
+    function disconnectToken() {
+      config.token = '';
+      clearStoredToken();
+      clearCardState();
+      setConnStatus('Admin token cleared from this tab and this device.', 'ok');
+    }
+
+    function forgetToken() {
+      config.token = '';
+      clearStoredToken();
+      clearCardState();
+      setConnStatus('Forgot the admin token on this device (sessionStorage and localStorage).', 'ok');
     }
 
     async function testConnection() {
@@ -601,7 +672,17 @@
           infoEl.textContent = hasToken()
             ? 'Server is reachable. Loading status from /admin/mcp.'
             : 'Server is reachable. Connect with an admin token to see Status, Settings, Pending, and Logs.';
-          if (hasToken()) await refreshHome();
+          if (hasToken()) {
+            try {
+              await refreshHome();
+              setConnStatus('Health is 200. Admin status loaded.', 'ok');
+              infoEl.textContent = 'Server is reachable. Status, Settings, Pending, and Logs are loaded from /admin/mcp.';
+            } catch (adminErr) {
+              const why = adminErr && adminErr.message ? adminErr.message : String(adminErr);
+              setConnStatus('Health is 200, but admin status failed: ' + why, 'error');
+              infoEl.textContent = 'Could not load admin status from /admin/mcp. ' + why;
+            }
+          }
         } else {
           throw new Error('HTTP ' + res.status);
         }
@@ -612,34 +693,123 @@
       }
     }
 
-    async function mcpCall(name, args) {
-      if (!hasToken()) {
-        const err = new Error('no_token');
-        err.code = 'no_token';
-        throw err;
-      }
+    function mcpHeaders() {
       const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/event-stream',
-        'Authorization': 'Bearer ' + config.token
+        'Authorization': 'Bearer ' + config.token,
+        'Mcp-Protocol-Version': MCP_PROTOCOL
       };
-      const body = {
-        jsonrpc: '2.0',
-        id: Date.now(),
-        method: 'tools/call',
-        params: { name: name, arguments: args || {} }
-      };
-      const res = await fetch(adminMcpUrl(), {
-        method: 'POST', headers, body: JSON.stringify(body), mode: 'cors'
-      });
+      if (mcpSessionId) headers['Mcp-Session-Id'] = mcpSessionId;
+      return headers;
+    }
+
+    function rememberMcpSession(res) {
+      const sid = res.headers.get('mcp-session-id') || res.headers.get('Mcp-Session-Id');
+      if (sid) mcpSessionId = sid;
+    }
+
+    function parseMcpBody(res, raw) {
+      const ctype = ((res && res.headers && res.headers.get('content-type')) || '').toLowerCase();
+      const text = raw == null ? '' : String(raw);
+      if (!text.trim()) return null;
+      if (ctype.indexOf('text/event-stream') !== -1 || /^\s*(event:|data:)/m.test(text)) {
+        let last = null;
+        const chunks = text.replace(/\r\n/g, '\n').split('\n\n');
+        for (const chunk of chunks) {
+          const lines = chunk.split('\n');
+          const dataLines = [];
+          for (const line of lines) {
+            if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+          }
+          const payload = dataLines.join('\n').trim();
+          if (!payload || payload === '[DONE]') continue;
+          try { last = JSON.parse(payload); } catch (e) {}
+        }
+        return last;
+      }
+      try { return JSON.parse(text); } catch (e) {
+        const err = new Error('The admin door returned a non-JSON body.');
+        err.code = 'parse';
+        throw err;
+      }
+    }
+
+    async function mcpPost(payload, timeoutMs) {
+      const ms = timeoutMs == null ? MCP_TIMEOUT_MS : timeoutMs;
+      const ctrl = new AbortController();
+      const timer = setTimeout(function() { ctrl.abort(); }, ms);
+      try {
+        const res = await fetch(adminMcpUrl(), {
+          method: 'POST',
+          headers: mcpHeaders(),
+          body: JSON.stringify(payload),
+          mode: 'cors',
+          signal: ctrl.signal
+        });
+        rememberMcpSession(res);
+        const raw = await res.text();
+        const data = parseMcpBody(res, raw);
+        return { res: res, raw: raw, data: data };
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          const err = new Error('Timed out waiting for /admin/mcp after ' + (ms / 1000) + 's. Confirm RIVIA_CORS_ORIGINS includes this page origin exactly (https://hub.rivia.observer) and that the tablet server is up.');
+          err.code = 'timeout';
+          throw err;
+        }
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function raiseIfAuth(res) {
       if (res.status === 401 || res.status === 403) {
         const err = new Error('Admin token was refused (HTTP ' + res.status + ').');
         err.code = 'auth';
         throw err;
       }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message || data.error);
+    }
+
+    async function ensureMcpSession() {
+      if (mcpInit) return mcpInit;
+      mcpInit = (async function() {
+        const out = await mcpPost({
+          jsonrpc: '2.0',
+          id: 'init',
+          method: 'initialize',
+          params: {
+            protocolVersion: MCP_PROTOCOL,
+            capabilities: {},
+            clientInfo: { name: 'rivia-hub', version: '1' }
+          }
+        });
+        raiseIfAuth(out.res);
+        if (out.res.ok) {
+          try {
+            const note = await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+            raiseIfAuth(note.res);
+          } catch (e) {
+            if (e && (e.code === 'auth' || e.code === 'timeout')) throw e;
+          }
+        }
+      })();
+      try {
+        await mcpInit;
+      } catch (e) {
+        mcpInit = null;
+        if (e && (e.code === 'auth' || e.code === 'timeout')) throw e;
+        // Stateless JSON admin door may not require a session. tools/call will tell us.
+      }
+    }
+
+    function unwrapTool(data) {
+      if (!data) {
+        const err = new Error('Empty reply from /admin/mcp.');
+        err.code = 'empty';
+        throw err;
+      }
+      if (data.error) throw new Error((data.error.message || data.error.msg || data.error.code || data.error));
       const result = data.result || {};
       const sc = result.structuredContent;
       if (sc) return sc;
@@ -650,29 +820,42 @@
       return result;
     }
 
+    async function mcpCall(name, args) {
+      if (!hasToken()) {
+        const err = new Error('no_token');
+        err.code = 'no_token';
+        throw err;
+      }
+      await ensureMcpSession();
+      const out = await mcpPost({
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: { name: name, arguments: args || {} }
+      });
+      raiseIfAuth(out.res);
+      if (!out.res.ok) throw new Error('HTTP ' + out.res.status);
+      return unwrapTool(out.data);
+    }
+
     async function mcpList() {
       if (!hasToken()) {
         const err = new Error('no_token');
         err.code = 'no_token';
         throw err;
       }
-      const headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/event-stream',
-        'Authorization': 'Bearer ' + config.token
-      };
-      const res = await fetch(adminMcpUrl(), {
-        method: 'POST', headers, mode: 'cors',
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      await ensureMcpSession();
+      const out = await mcpPost({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+        params: {}
       });
-      if (res.status === 401 || res.status === 403) {
-        const err = new Error('Admin token was refused (HTTP ' + res.status + ').');
-        err.code = 'auth';
-        throw err;
-      }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      return (data && data.result && data.result.tools) || [];
+      raiseIfAuth(out.res);
+      if (!out.res.ok) throw new Error('HTTP ' + out.res.status);
+      const data = out.data || {};
+      if (data.error) throw new Error(data.error.message || data.error);
+      return (data.result && data.result.tools) || [];
     }
 
     function fillKv(el, rows) {
@@ -724,6 +907,7 @@
         empty.textContent = err.code === 'no_token'
           ? 'Connect with an admin token to see status.'
           : ('Could not load status: ' + err.message);
+        if (err.code !== 'no_token') throw err;
       }
     }
 
@@ -840,6 +1024,7 @@
         renderSettings(items);
       } catch (err) {
         card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see and change settings.' : ('Could not load settings: ' + err.message)) + '</div>';
+        if (err.code !== 'no_token') throw err;
       }
     }
 
@@ -939,6 +1124,7 @@
         renderPending(items);
       } catch (err) {
         card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see the queue.' : ('Could not load pending: ' + err.message)) + '</div>';
+        if (err.code !== 'no_token') throw err;
       }
     }
 
@@ -976,6 +1162,7 @@
         card.appendChild(table);
       } catch (err) {
         card.innerHTML = '<div class="empty">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to see logs.' : ('Could not load logs: ' + err.message)) + '</div>';
+        if (err.code !== 'no_token') throw err;
       }
     }
 
@@ -1043,6 +1230,7 @@
         }
       } catch (err) {
         listEl.innerHTML = '<div class="info" style="padding:16px; color:var(--error);">' + escapeHtml(err.code === 'no_token' ? 'Connect with an admin token to list tools.' : ('Could not load tools: ' + err.message)) + '</div>';
+        if (err.code !== 'no_token') throw err;
       }
     }
 
@@ -1099,9 +1287,7 @@
 
     async function refreshHome() {
       if (!hasToken()) return;
-      try {
-        await Promise.all([loadStatus(), loadPending()]);
-      } catch (e) {}
+      await Promise.all([loadStatus(), loadPending()]);
     }
 
     function escapeHtml(str) {

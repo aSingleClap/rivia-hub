@@ -106,11 +106,11 @@ ok(not ra.admin_token_matches(ADMIN), "the revoked admin token does not match th
 ok(not ra.admin_token_matches(""), "an empty bearer does not match")
 
 # cors_origins drops * and null
-os.environ["RIVIA_CORS_ORIGINS"] = "https://console.rivia.observer, *, null, NULL"
+os.environ["RIVIA_CORS_ORIGINS"] = "https://hub.rivia.observer, *, null, NULL"
 origins = ra.cors_origins()
-ok(origins == ["https://console.rivia.observer"],
+ok(origins == ["https://hub.rivia.observer"],
    "CORS allowlist keeps the hub origin and drops * and null")
-os.environ["RIVIA_CORS_ORIGINS"] = "https://console.rivia.observer"
+os.environ["RIVIA_CORS_ORIGINS"] = "https://hub.rivia.observer"
 
 # ── live doors ──
 sched.set_selftest(True)
@@ -194,15 +194,55 @@ ok(admin_names == set(admin.ADMIN_TOOLS),
 
 # CORS: hub origin is allowed, another origin is not
 status, headers, _body = raw_post("/admin/mcp", ADMIN2, tools_list_body(),
-                                  origin="https://console.rivia.observer")
+                                  origin="https://hub.rivia.observer")
 # public_app was built when RIVIA_CORS_ORIGINS was already set
 acao = headers.get("Access-Control-Allow-Origin") or headers.get("access-control-allow-origin")
-ok(acao == "https://console.rivia.observer",
+ok(acao == "https://hub.rivia.observer",
    "CORS allows the hub origin on the admin door")
 status, headers, _body = raw_post("/admin/mcp", ADMIN2, tools_list_body(),
                                   origin="https://evil.example")
 acao = headers.get("Access-Control-Allow-Origin") or headers.get("access-control-allow-origin")
 ok(acao != "https://evil.example", "CORS does not allow a foreign origin")
+
+# Preflight: allow and expose the headers the hub fetch uses
+def raw_options(path, origin, req_headers):
+    url = BASE + path
+    headers = {
+        "Origin": origin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": req_headers,
+    }
+    req = urllib.request.Request(url, method="OPTIONS", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+opt_status, opt_h, _opt_b = raw_options(
+    "/admin/mcp", "https://hub.rivia.observer",
+    "authorization,content-type,accept,mcp-session-id,mcp-protocol-version",
+)
+def _h(headers, name):
+    for k, v in headers.items():
+        if k.lower() == name.lower():
+            return v
+    return ""
+allow_h = _h(opt_h, "Access-Control-Allow-Headers").lower()
+ok(opt_status == 200 and _h(opt_h, "Access-Control-Allow-Origin") == "https://hub.rivia.observer",
+   "OPTIONS preflight allows the hub origin")
+ok("authorization" in allow_h and "content-type" in allow_h
+   and "mcp-session-id" in allow_h and "mcp-protocol-version" in allow_h,
+   "preflight allows Authorization, Content-Type, Mcp-Session-Id, mcp-protocol-version")
+
+# A real POST must expose Mcp-Session-Id so the browser can read it
+_st, post_h, _pb = raw_post("/admin/mcp", ADMIN2, tools_list_body(),
+                            origin="https://hub.rivia.observer")
+expose = _h(post_h, "Access-Control-Expose-Headers").lower()
+ok(_st == 200 and "mcp-session-id" in expose,
+   "a CORS POST exposes Mcp-Session-Id to the page")
+ok("mcp-protocol-version" in expose,
+   "a CORS POST exposes mcp-protocol-version")
 
 
 async def listed(url, token):

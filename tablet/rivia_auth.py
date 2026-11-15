@@ -124,11 +124,14 @@ ADMIN_TOKEN_DAYS = 7
 APP_TOKEN_DAYS = 365
 # Browser origins allowed to call this server (CORS). Exact origins, comma-separated,
 # scheme + host + optional port, no path. Put only the Server Hub origin here, e.g.
-# RIVIA_CORS_ORIGINS="https://console.rivia.observer". Empty = CORS off (the hub
+# RIVIA_CORS_ORIGINS="https://hub.rivia.observer". Empty = CORS off (the hub
 # cannot call /admin/mcp from a browser until this is set). "*" and "null" are
 # dropped on purpose: either would let any page (or any sandboxed frame) read
 # replies from this server.
-CORS_HEADERS = ["authorization", "content-type", "mcp-session-id", "mcp-protocol-version"]
+CORS_HEADERS = [
+    "authorization", "content-type", "accept",
+    "mcp-session-id", "mcp-protocol-version",
+]
 
 
 def cors_origins():
@@ -627,7 +630,7 @@ def with_cors(app):
         allow_origins=origins,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=CORS_HEADERS,
-        expose_headers=["mcp-session-id", "www-authenticate"],
+        expose_headers=["mcp-session-id", "mcp-protocol-version", "www-authenticate"],
         max_age=600,
     )
 
