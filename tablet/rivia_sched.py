@@ -277,6 +277,7 @@ SETTINGS = {
     "wake_up_minutes":       {"planner": "wakeUpM",        "default": 60,   "min": 15,   "max": 180,  "type": "int",   "unit": "minutes", "label": "Wake-up",                  "day": True,  "ask": True,  "group": "schedule"},
     "sleep_target_hours":    {"planner": "sleepTargetH",   "default": 8,    "min": 4,    "max": 10,   "type": "int",   "unit": "hours",   "label": "Sleep target",             "day": True,  "ask": True,  "group": "schedule"},
     "place_radius_meters":   {"planner": "placeRadiusM",   "default": 400,  "min": 50,   "max": 2000, "type": "int",   "unit": "meters",  "label": "Place radius",             "day": False, "ask": False, "group": "system"},
+    "geofence_radius_meters":{"planner": None,             "default": 150,  "min": 100,  "max": 400,  "type": "int",   "unit": "meters",  "label": "Geofence radius",          "day": False, "ask": False, "group": "system", "doors": ("termux", "admin")},
     "overnight_hours":       {"planner": "overnightH",     "default": 8,    "min": 4,    "max": 16,   "type": "int",   "unit": "hours",   "label": "Overnight horizon",        "day": False, "ask": False, "group": "system"},
     "home_lookahead_hours":  {"planner": "homeLookaheadH", "default": 20,   "min": 8,    "max": 36,   "type": "int",   "unit": "hours",   "label": "Home lookahead",           "day": False, "ask": False, "group": "system"},
     "learn_keep_rides":      {"planner": "learnKeep",      "default": 10,   "min": 3,    "max": 50,   "type": "int",   "unit": "rides",   "label": "Learned rides to keep",    "day": False, "ask": False, "group": "system"},
@@ -310,6 +311,10 @@ CHANGE_SETTING_DESCRIPTION = (
 UNDO_CHANGE_DESCRIPTION = (
     "Undo a schedule setting change. With no change_id, undo the latest change made "
     "through this door in the last 24 hours. Restores the old value and logs a new change."
+)
+PLACES_DESCRIPTION = (
+    "Jordan's places for geofences: each place's id, spoken name, pin (lat, lng), "
+    "and geofence radius in meters."
 )
 
 
@@ -365,6 +370,16 @@ def _load_value(text):
 
 def _coerce(spec, value):
     typ = spec["type"]
+    if typ == "pin":
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            value = {"lat": value[0], "lng": value[1]}
+        try:
+            parsed = rp.parse_coords(value)
+        except rp.RiviaError as e:
+            raise SettingsError("bad_value", str(e), step="input") from e
+        if not parsed:
+            raise SettingsError("bad_value", "A pin needs lat and lng.", step="input")
+        return {"lat": parsed["lat"], "lng": parsed["lng"]}
     if typ == "int":
         if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("true", "false")):
             raise SettingsError("bad_value", "Expected a whole number.", step="input")
@@ -432,7 +447,22 @@ def _parse_key(key):
             "day": False, "ask": True, "group": "schedule",
         }
     if key.startswith("place."):
-        raise SettingsError("bad_key", "Place settings can only be changed from the web app.", step="input")
+        parts = key.split(".")
+        if len(parts) != 3 or parts[1] not in RIDE_PLACES:
+            raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
+        if parts[2] != "pin":
+            raise SettingsError(
+                "bad_key",
+                "Place address and spoken name can only be changed from the web app.",
+                step="input",
+            )
+        label = "%s pin" % (rp.PLACES[parts[1]]["say"],)
+        return {
+            "key": key, "family": "place", "place_id": parts[1], "field": "pin",
+            "default": None, "min": None, "max": None, "type": "pin", "unit": "lat,lng",
+            "label": label, "day": False, "ask": False, "group": "places",
+            "doors": ("termux", "admin", "web"),
+        }
     raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
 
 
@@ -452,11 +482,17 @@ def _gym_keys():
     return out
 
 
+def _place_keys():
+    return ["place.%s.pin" % pid for pid in RIDE_PLACES]
+
+
+def _all_setting_keys():
+    return list(SETTINGS) + _ride_keys() + _gym_keys() + _place_keys()
+
+
 def _keys_for_group(group):
     group = (group or "schedule").strip().lower()
-    keys = list(SETTINGS)
-    keys.extend(_ride_keys())
-    keys.extend(_gym_keys())
+    keys = _all_setting_keys()
     if group in ("all", "*"):
         return keys
     return [k for k in keys if _parse_key(k)["group"] == group]
@@ -496,7 +532,7 @@ def _resolved(con, key, day=None):
 
 def _all_resolved(con, day=None, extra=None):
     out = {}
-    for key in list(SETTINGS) + _ride_keys() + _gym_keys():
+    for key in _all_setting_keys():
         val, src = _resolved(con, key, day=day)
         out[key] = (val, src)
     if extra:
@@ -528,11 +564,14 @@ def _apply_one(key, value):
         return
     spec = _parse_key(key)
     if spec["family"] == "scalar":
-        rp.CFG[spec["planner"]] = value
+        planner = spec.get("planner")
+        if planner:
+            rp.CFG[planner] = value
     elif spec["family"] == "ride":
         rp.MEASURED_LEGS[rp.leg_key(spec["a"], spec["b"])] = value
     elif spec["family"] == "gym":
         rp.GYM_HOURS[spec["gym_id"]][spec["field"]] = value
+    # place pins live in places.json, not in the planner module.
 
 
 def _apply_resolved(resolved):
@@ -590,6 +629,39 @@ def _consistency_problems(resolved):
             op, cl = v("gym_hours.%s.%s_open" % (gid, kind)), v("gym_hours.%s.%s_close" % (gid, kind))
             if op is not None and cl is not None and op >= cl:
                 problems.append("%s %s opening must be before closing." % (name, kind))
+    problems.extend(_pin_spacing_problems(resolved))
+    return problems
+
+
+def geofence_radius_m(resolved=None, con=None):
+    if resolved is not None and "geofence_radius_meters" in resolved:
+        val = resolved["geofence_radius_meters"][0]
+        return int(val if val is not None else SETTINGS["geofence_radius_meters"]["default"])
+    if con is not None:
+        val, _src = _resolved(con, "geofence_radius_meters")
+        return int(val if val is not None else SETTINGS["geofence_radius_meters"]["default"])
+    return int(SETTINGS["geofence_radius_meters"]["default"])
+
+
+def _pin_spacing_problems(resolved):
+    """Pins must stay at least 2× the geofence radius apart so gym and work do not overlap."""
+    radius = geofence_radius_m(resolved)
+    min_m = 2 * radius
+    pins = {}
+    for pid in RIDE_PLACES:
+        val = (resolved.get("place.%s.pin" % pid) or (None, None))[0]
+        if val and isinstance(val, dict) and "lat" in val and "lng" in val:
+            pins[pid] = val
+    problems = []
+    ids = list(pins)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            d = rp.meters_between(pins[a], pins[b])
+            if d < min_m:
+                problems.append(
+                    "The %s and %s pins are %.0f m apart; they must be at least %d m "
+                    "apart (2× the %d m geofence radius)." % (a, b, d, min_m, radius)
+                )
     return problems
 
 
@@ -780,6 +852,13 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
         day_s = None
 
     # Check 1 continued: this door may change this key at this scope.
+    allowed = spec.get("doors")
+    if allowed and door not in allowed:
+        raise SettingsError(
+            "bad_key",
+            "This setting cannot be changed from the %s door." % door,
+            step="input",
+        )
     if door == "app" and scope == "standing":
         raise SettingsError("standing_not_available", STANDING_UNAVAILABLE, step="settings")
     if door == "app" and not spec.get("ask", True) and not spec["day"]:
@@ -832,6 +911,8 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
                 new=value_s, preview=preview, status="applied", decided=created,
                 reason=reason, request_id=request_id)
     data["reason"] = reason
+    if spec["family"] == "place" and spec.get("field") == "pin":
+        data["places_file"] = rewrite_places_file(con)
     return data
 
 
@@ -842,7 +923,12 @@ def undo_change_sync(change_id=None, door="app", now=None, con=None):
         ensure_store(con)
         close = True
     try:
-        return _undo_change(con, change_id=change_id, door=door, now=now)
+        out = _undo_change(con, change_id=change_id, door=door, now=now)
+        key = (out or {}).get("key") or ""
+        if key.startswith("place.") and key.endswith(".pin"):
+            out = dict(out)
+            out["places_file"] = rewrite_places_file(con)
+        return out
     finally:
         if close:
             con.close()
@@ -1067,6 +1153,135 @@ def undo_change_tool(change_id: str | None = None) -> dict:
 undo_change = tool(undo_change_tool)
 
 
+def rewrite_places_file(con=None):
+    """Rewrite ~/rivia/places.json from standing pin settings. The planner reads that file."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        pins = {}
+        for pid in RIDE_PLACES:
+            val, _src = _resolved(con, "place.%s.pin" % pid)
+            if val and isinstance(val, dict) and "lat" in val and "lng" in val:
+                pins[pid] = {"lat": val["lat"], "lng": val["lng"]}
+        path = rp.PLACES_FILE
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(pins, f, indent=1)
+            f.write("\n")
+        os.replace(tmp, path)
+        return path
+    finally:
+        if close:
+            con.close()
+
+
+def places_sync(con=None):
+    """Each known place: id, spoken name, lat, lng, and the current geofence radius."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        radius = geofence_radius_m(con=con)
+        items = []
+        for pid in RIDE_PLACES:
+            pin, _src = _resolved(con, "place.%s.pin" % pid)
+            items.append({
+                "id": pid,
+                "spoken_name": rp.PLACES[pid]["say"],
+                "lat": None if not pin else pin.get("lat"),
+                "lng": None if not pin else pin.get("lng"),
+                "radius_m": radius,
+            })
+        return {"places": items, "radius_m": radius}
+    finally:
+        if close:
+            con.close()
+
+
+def places_tool() -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = places_sync()
+        return ok_reply("places", data)
+    except SettingsError as e:
+        return _settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "places")
+
+
+places = tool(places_tool)
+
+
+def cmd_pin(place, lat, lng):
+    """Store a standing place.<id>.pin through the normal setting checks. Termux only."""
+    place = str(place or "").strip()
+    if place not in rp.PLACES:
+        raise SettingsError(
+            "bad_place",
+            "Unknown place: %s. Use home, farm, gym, pf, or hmc." % (place or "(none)",),
+            step="input",
+        )
+    data = change_setting_sync(
+        "place.%s.pin" % place, {"lat": lat, "lng": lng}, "standing", door="termux",
+    )
+    return {"ok": True, **data}
+
+
+def invoke_app_tool(name, args=None):
+    """Call a seeded app-door tool locally (rivia sched call)."""
+    import rivia_tools as tools
+    name = str(name or "").strip()
+    if not name:
+        raise SettingsError("bad_tool", "usage: rivia sched call <tool> [json]", step="input")
+    rows = [r for r in tools.load_rows(door="app", enabled_only=True) if r["name"] == name]
+    if not rows:
+        raise SettingsError("bad_tool", "No app-door tool named %s." % name, step="input")
+    row = rows[0]
+    action = row["action"]
+    if action not in ACTIONS:
+        raise SettingsError("bad_tool", "Tool %s has no action." % name, step="input")
+    info = ACTIONS[action]
+    preset = row.get("preset") or {}
+    if isinstance(preset, str):
+        preset = json.loads(preset or "{}")
+    merged = dict(preset)
+    merged.update(args or {})
+    kwargs = {}
+    for py, pub in (info.get("py_params") or {}).items():
+        if pub in merged and merged[pub] is not None:
+            kwargs[py] = merged[pub]
+    fn = info["fn"]
+    result = fn(**kwargs)
+    if hasattr(result, "__await__"):
+        result = asyncio.run(result)
+    return result
+
+
+def cmd_call(name, raw_json="{}"):
+    raw = raw_json if raw_json is not None else "{}"
+    raw = str(raw).strip() or "{}"
+    try:
+        args = json.loads(raw)
+    except ValueError as e:
+        raise SettingsError("bad_json", "Arguments must be a JSON object: %s" % e, step="input") from e
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise SettingsError("bad_json", "Arguments must be a JSON object.", step="input")
+    return invoke_app_tool(name, args)
+
+
 # Only actions that exist now belong here (G5: seed a row only once its action works).
 ACTIONS = {
     "sched.ride_time": {
@@ -1124,6 +1339,15 @@ ACTIONS = {
         "time_bearing": False,
         "description": UNDO_CHANGE_DESCRIPTION,
     },
+    "sched.places": {
+        "fn": places,
+        "lockable": (),
+        "py_params": {},
+        "doors": ("app",),
+        "kind": "places",
+        "time_bearing": False,
+        "description": PLACES_DESCRIPTION,
+    },
 }
 
 
@@ -1168,7 +1392,7 @@ def main(argv=None):
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json]")
         return 2
     try:
         # restore / rides / start-fresh are Termux recovery commands; they must
@@ -1190,6 +1414,20 @@ def main(argv=None):
         if not selftest_ok():
             print(json.dumps({"ok": False, "error": {"code": "selftest_failed", "msg": "planner selftest failed", "step": "planner"}}, indent=1))
             return 1
+        if cmd == "pin":
+            if len(argv) < 4:
+                print("usage: rivia sched pin <place> <lat> <lng>", file=_sys.stderr)
+                return 2
+            out = cmd_pin(argv[1], argv[2], argv[3])
+            print(json.dumps(out, indent=1))
+            return 0
+        if cmd == "call":
+            if len(argv) < 2:
+                print("usage: rivia sched call <tool> [json]", file=_sys.stderr)
+                return 2
+            out = cmd_call(argv[1], argv[2] if len(argv) > 2 else "{}")
+            print(json.dumps(out, indent=1))
+            return 0 if out.get("ok") else 1
         if cmd == "settings":
             day = argv[1] if len(argv) > 1 else None
             data = get_settings_sync(group="schedule", day=day)
@@ -1207,7 +1445,7 @@ def main(argv=None):
             finally:
                 con.close()
             return 0
-        print("unknown command: %s (use settings, settings-log, rides, restore <file>, or start-fresh)" % cmd, file=_sys.stderr)
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, or call)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))
