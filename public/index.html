@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <title>Server Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* Rivia sleek UI (the "Rivia — sleek UI" canvas): true black, flat surfaces,
+       white as the only accent, amber/red for status only, Inter throughout. */
+    :root {
+      --bg: #000000;
+      --surface: #0E0E0E;
+      --fill: #161616;
+      --fill-2: #1C1C1C;
+      --fill-3: #2A2A2A;
+      --line: #262626;
+      --line-2: #3A3A3A;
+      --text: #EDEDED;
+      --bright: #F5F5F5;
+      --muted: #A3A3A3;
+      --faint: #8F8F8F;
+      --warn: #F2B84B;
+      --error: #FF6B6B;
+      --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --tap: 44px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { color-scheme: dark; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    :focus-visible { outline: 2px solid var(--bright); outline-offset: 2px; }
+
+    /* ---------- header ---------- */
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+      height: 64px; padding: 0 12px 0 20px;
+    }
+    .logo { font-size: 17px; font-weight: 600; letter-spacing: 0.03em; }
+    nav { display: flex; gap: 4px; align-items: center; }
+    .nav-link {
+      height: 36px; padding: 0 14px;
+      border: 1px solid transparent; border-radius: 18px;
+      background: transparent; color: var(--muted);
+      font: 500 13px var(--font); cursor: pointer;
+    }
+    .nav-link:hover { color: var(--text); }
+    .nav-link.active { background: var(--fill); color: var(--text); }
+
+    /* ---------- page ---------- */
+    main { max-width: 760px; margin: 0 auto; padding: 8px 20px 48px; }
+
+    /* The one bold element: Rivia's particle sphere, reacting to server status. */
+    .hero { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 8px 0 28px; }
+    #sphere { width: 180px; height: 180px; display: block; margin-bottom: 18px; }
+    h1 { font-size: 22px; font-weight: 500; color: var(--bright); margin-bottom: 4px; }
+    .subtitle { color: var(--muted); font-size: 14px; }
+    .wizard-head { padding: 16px 0 24px; }
+    .wizard-head .subtitle { margin-top: 2px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      margin-bottom: 12px;
+    }
+
+    /* ---------- status ---------- */
+    .status-header { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .status-name { font-size: 16px; font-weight: 600; }
+    .status-word { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+    /* ok = white dot, idle/stopped = amber ring, error = red diamond */
+    .status-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #FFFFFF; box-shadow: 0 0 8px rgba(255,255,255,0.6); }
+    .status-dot.idle, .status-dot.stopped { width: 9px; height: 9px; background: transparent; border: 1.5px solid var(--warn); box-shadow: none; }
+    .status-dot.error { width: 8px; height: 8px; border-radius: 1px; background: var(--error); box-shadow: none; transform: rotate(45deg); }
+
+    .controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+
+    /* ---------- buttons ---------- */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      height: var(--tap); padding: 0 18px;
+      border: 0; border-radius: 22px;
+      font: 500 14px var(--font); cursor: pointer;
+    }
+    .btn svg { flex: none; }
+    .btn-primary { background: var(--bright); color: #000000; font-weight: 600; }
+    .btn-primary:hover, .btn-primary:active { background: #FFFFFF; }
+    .btn-secondary { background: var(--fill); color: var(--text); }
+    .btn-secondary:hover, .btn-secondary:active { background: var(--fill-2); }
+
+    .info { color: var(--muted); font-size: 14px; }
+    .meta { font-family: var(--mono); font-size: 12px; color: var(--faint); margin-top: 6px; overflow-wrap: anywhere; }
+
+    .conn-status {
+      margin-top: 14px; padding: 10px 14px;
+      border: 1px solid var(--line-2); border-radius: 14px;
+      font-size: 13px; color: #C7C7C7;
+      overflow-wrap: anywhere;
+    }
+    .conn-status.ok { color: var(--text); }
+    .conn-status.error { color: var(--error); border-color: rgba(255,107,107,0.35); }
+
+    /* ---------- rows (drawer style) ---------- */
+    .rows { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
+    .row {
+      display: flex; align-items: center; gap: 14px; width: 100%;
+      min-height: 60px; padding: 8px 12px;
+      border: 0; border-radius: 14px;
+      background: transparent; color: var(--text);
+      font: inherit; text-align: left; cursor: pointer;
+    }
+    .row:hover, .row:active { background: rgba(255,255,255,0.06); }
+    .row > svg { flex: none; color: var(--muted); }
+    .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .row-title { font-size: 15px; font-weight: 500; }
+    .row-sub { font-size: 12px; color: var(--faint); }
+    .soon { flex: none; font-size: 12px; color: var(--faint); }
+
+    /* ---------- wizard ---------- */
+    .wizard { display: none; }
+    .wizard.active { display: block; }
+
+    .steps { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+    .step { height: 32px; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 16px; background: var(--fill); color: var(--muted); font-size: 13px; font-weight: 500; }
+    .step.active { background: var(--bright); color: #000000; }
+
+    .form-group { margin-bottom: 18px; }
+    label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 500; }
+    .hint { font-size: 12px; color: var(--faint); margin-top: 6px; }
+
+    input, select {
+      width: 100%; height: 52px; padding: 0 18px;
+      border: 1px solid transparent; border-radius: 26px;
+      background: var(--fill); color: var(--text);
+      font: 400 15px var(--font);
+    }
+    input::placeholder { color: var(--faint); }
+    input:focus, select:focus { outline: none; border-color: rgba(255,255,255,0.5); }
+    #serverUrl, #token { font-family: var(--mono); font-size: 14px; }
+
+    .review-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+    .review { color: var(--muted); font-size: 14px; line-height: 1.9; overflow-wrap: anywhere; }
+    .review strong { color: var(--text); font-weight: 500; }
+
+    .wizard-actions { display: flex; justify-content: space-between; margin-top: 20px; gap: 8px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">Server Hub</span>
+    <nav>
+      <button type="button" class="nav-link active" id="nav-dashboard" onclick="showView('dashboard')">Home</button>
+      <button type="button" class="nav-link" id="nav-wizard" onclick="showView('wizard')">Add Server</button>
+    </nav>
+  </header>
+
+  <!-- Dashboard / Home -->
+  <main id="view-dashboard">
+    <section class="hero">
+      <canvas id="sphere" aria-hidden="true"></canvas>
+      <h1>Hub</h1>
+      <p class="subtitle">Manage the MCP server on your Tab S7+.</p>
+    </section>
+
+    <div class="card">
+      <div class="status-header">
+        <div class="status-dot idle" id="statusDot"></div>
+        <span class="status-name" id="serverTitle">Tab S7+ Server</span>
+        <span class="status-word" id="statusText">Not configured</span>
+      </div>
+      <div class="controls">
+        <button type="button" class="btn btn-primary" onclick="testConnection()">Test Connection</button>
+        <button type="button" class="btn btn-secondary" onclick="setStatus('running')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"></path></svg>Start
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="setStatus('stopped')">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>Stop
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="restart()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v5h-5"></path></svg>Restart
+        </button>
+      </div>
+      <div class="info" id="infoText">Configure your server to get started.</div>
+      <div class="meta" id="serverMeta">URL: not set</div>
+      <div id="connStatus" class="conn-status hidden"></div>
+    </div>
+
+    <div class="card rows" role="list">
+      <button type="button" class="row" role="listitem" onclick="alert('Tools list coming next')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6.5a4 4 0 0 0 5 5L13 18a2.1 2.1 0 0 1-3-3z"></path><path d="M10 15l-4.5 4.5"></path></svg>
+        <span class="row-text"><span class="row-title">Tools</span><span class="row-sub">View and manage the tools this server exposes to Rivia.</span></span>
+        <span class="soon">Soon</span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="alert('Logs coming next')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"></path></svg>
+        <span class="row-text"><span class="row-title">Logs</span><span class="row-sub">See recent activity from the server.</span></span>
+        <span class="soon">Soon</span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="showView('wizard')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path><circle cx="16" cy="7" r="2"></circle><circle cx="8" cy="17" r="2"></circle></svg>
+        <span class="row-text"><span class="row-title">Connection</span><span class="row-sub">Update URL, token, or reconfigure the tunnel.</span></span>
+      </button>
+      <button type="button" class="row" role="listitem" onclick="alert('Info library coming next')">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"></path><path d="M3 13l9 5 9-5"></path></svg>
+        <span class="row-text"><span class="row-title">Learn</span><span class="row-sub">Explanations of MCP concepts at different levels.</span></span>
+        <span class="soon">Soon</span>
+      </button>
+    </div>
+  </main>
+
+  <!-- Wizard -->
+  <main id="view-wizard" class="wizard">
+    <div class="wizard-head">
+      <h1>Add MCP Server</h1>
+      <p class="subtitle">Connect via your Cloudflare tunnel.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step active" id="step-ind-1">1. Connection</div>
+      <div class="step" id="step-ind-2">2. Auth</div>
+      <div class="step" id="step-ind-3">3. Review</div>
+    </div>
+
+    <div class="card" id="step-1">
+      <div class="form-group">
+        <label for="serverUrl">Server URL</label>
+        <input type="text" id="serverUrl" value="https://mcp.rivia.observer" placeholder="https://mcp.rivia.observer" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false">
+        <div class="hint">Your Cloudflare tunnel address.</div>
+      </div>
+      <div class="form-group">
+        <label for="serverName">Server name</label>
+        <input type="text" id="serverName" value="Tab S7+ Server">
+      </div>
+      <div class="wizard-actions">
+        <button type="button" class="btn btn-secondary" onclick="showView('dashboard')">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="nextStep(2)">Next</button>
+      </div>
+    </div>
+
+    <div class="card hidden" id="step-2">
+      <div class="form-group">
+        <label for="token">Access token (optional)</label>
+        <input type="password" id="token" placeholder="Bearer token if required" autocomplete="off">
+        <div class="hint">Stored only in this browser session for now.</div>
+      </div>
+      <div class="form-group">
+        <label for="serverDesc">Short description</label>
+        <input type="text" id="serverDesc" placeholder="What this server is for">
+      </div>
+      <div class="wizard-actions">
+        <button type="button" class="btn btn-secondary" onclick="prevStep(1)">Back</button>
+        <button type="button" class="btn btn-primary" onclick="nextStep(3)">Next</button>
+      </div>
+    </div>
+
+    <div class="card hidden" id="step-3">
+      <h3 class="review-title">Review</h3>
+      <div id="reviewContent" class="review"></div>
+      <div class="wizard-actions">
+        <button type="button" class="btn btn-secondary" onclick="prevStep(2)">Back</button>
+        <button type="button" class="btn btn-primary" onclick="finishWizard()">Save & Test</button>
+      </div>
+    </div>
+  </main>
+
+  <script>
+
+    // ---------- particle sphere (same idea as the app's home sphere, drawn on one canvas) ----------
+    const sphere = (() => {
+      const cv = document.getElementById('sphere');
+      const ctx = cv.getContext('2d');
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const N = 420, golden = Math.PI * (3 - Math.sqrt(5));
+      let seed = 2026;
+      const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+      const pts = [];
+      for (let i = 0; i < N; i++) {
+        const y = 1 - 2 * (i + 0.5) / N, r = Math.sqrt(1 - y * y), t = i * golden;
+        pts.push({ x: Math.cos(t) * r, y, z: Math.sin(t) * r, s: 0.6 + rnd() * 1.0, o: 0.55 + rnd() * 0.45, ph: rnd() * 6.28, tw: 1.6 + rnd() * 2.6 });
+      }
+      // mode: idle (slow, a little dim), ok (normal), busy (faster, brighter), error (dim, slow)
+      const MODES = { idle: { spin: 0.10, glow: 0.75 }, ok: { spin: 0.16, glow: 1 }, busy: { spin: 0.55, glow: 1.15 }, error: { spin: 0.05, glow: 0.32 } };
+      let mode = MODES.idle, spin = mode.spin, glow = mode.glow, angle = 0, last = 0;
+      const tilt = -16 * Math.PI / 180, ct = Math.cos(tilt), st = Math.sin(tilt);
+
+      function size() {
+        const d = window.devicePixelRatio || 1, w = cv.clientWidth;
+        cv.width = w * d; cv.height = w * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+      }
+      function draw(t) {
+        const w = cv.clientWidth, c = w / 2, R = w * 0.38, persp = 3;
+        ctx.clearRect(0, 0, w, w);
+        const core = ctx.createRadialGradient(c, c, 0, c, c, R * 0.9);
+        core.addColorStop(0, `rgba(220,235,255,${0.12 * glow})`); core.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = core; ctx.fillRect(0, 0, w, w);
+        const ca = Math.cos(angle), sa = Math.sin(angle);
+        for (const p of pts) {
+          const x1 = p.x * ca + p.z * sa, z1 = -p.x * sa + p.z * ca;
+          const y2 = p.y * ct - z1 * st, z2 = p.y * st + z1 * ct;
+          const k = persp / (persp - z2), front = (z2 + 1) / 2;
+          const tw = reduce ? 1 : 0.7 + 0.3 * Math.sin(t / 1000 * (6.28 / p.tw) + p.ph);
+          const a = Math.min(1, p.o * (0.18 + 0.82 * front) * tw * glow);
+          const r = p.s * k * (0.7 + 0.5 * front);
+          ctx.beginPath(); ctx.arc(c + x1 * R * k, c + y2 * R * k, r, 0, 6.2832);
+          ctx.fillStyle = `rgba(255,255,255,${a})`;
+          ctx.shadowColor = 'rgba(255,255,255,0.85)'; ctx.shadowBlur = front > 0.5 ? r * 2.4 : 0;
+          ctx.fill();
+        }
+        ctx.shadowBlur = 0;
+      }
+      function frame(t) {
+        const dt = last ? Math.min(0.05, (t - last) / 1000) : 0; last = t;
+        spin += (mode.spin - spin) * Math.min(1, dt * 2.5);
+        glow += (mode.glow - glow) * Math.min(1, dt * 2.5);
+        angle += spin * dt;
+        draw(t);
+        requestAnimationFrame(frame);
+      }
+      size(); window.addEventListener('resize', size);
+      if (reduce) { angle = 0.6; draw(0); } else requestAnimationFrame(frame);
+      return { set(m) { mode = MODES[m] || MODES.idle; if (reduce) { spin = mode.spin; glow = mode.glow; draw(0); } } };
+    })();
+    let config = {
+      url: localStorage.getItem('hub_url') || 'https://mcp.rivia.observer',
+      name: localStorage.getItem('hub_name') || 'Tab S7+ Server',
+      token: sessionStorage.getItem('hub_token') || '',
+      desc: localStorage.getItem('hub_desc') || ''
+    };
+
+    // Status shapes follow the app: 'ok' = mint dot, 'idle'/'stopped' = amber ring, 'error' = red diamond.
+    function setIndicator(kind, word) {
+      document.getElementById('statusDot').className = kind === 'ok' ? 'status-dot' : 'status-dot ' + kind;
+      document.getElementById('statusText').textContent = word;
+      sphere.set(kind === 'stopped' ? 'idle' : kind);
+    }
+
+    function setConnStatus(message, kind) {
+      const el = document.getElementById('connStatus');
+      el.className = 'conn-status' + (kind ? ' ' + kind : '');
+      el.textContent = message;
+    }
+
+    function loadConfig() {
+      document.getElementById('serverTitle').textContent = config.name;
+      // Nothing has been checked yet, so this is a ring, not a mint dot.
+      setIndicator('idle', config.url ? 'Ready' : 'Not configured');
+      document.getElementById('serverMeta').textContent = config.url ? `URL: ${config.url}` : 'URL: not set';
+      document.getElementById('serverUrl').value = config.url;
+      document.getElementById('serverName').value = config.name;
+      document.getElementById('serverDesc').value = config.desc;
+    }
+
+    function showView(view) {
+      document.getElementById('view-dashboard').style.display = view === 'dashboard' ? 'block' : 'none';
+      document.getElementById('view-wizard').classList.toggle('active', view === 'wizard');
+      document.getElementById('nav-dashboard').classList.toggle('active', view === 'dashboard');
+      document.getElementById('nav-wizard').classList.toggle('active', view === 'wizard');
+      if (view === 'wizard') showStep(1);
+    }
+
+    function showStep(n) {
+      for (let i = 1; i <= 3; i++) {
+        document.getElementById('step-' + i).classList.toggle('hidden', i !== n);
+        document.getElementById('step-ind-' + i).classList.toggle('active', i === n);
+      }
+      if (n === 3) buildReview();
+    }
+
+    function nextStep(n) { showStep(n); }
+    function prevStep(n) { showStep(n); }
+
+    function buildReview() {
+      const rows = [
+        ['Name', document.getElementById('serverName').value],
+        ['URL', document.getElementById('serverUrl').value],
+        ['Token', document.getElementById('token').value ? 'Provided' : 'None'],
+        ['Description', document.getElementById('serverDesc').value || '—']
+      ];
+      const box = document.getElementById('reviewContent');
+      box.textContent = '';
+      for (const [label, value] of rows) {
+        const line = document.createElement('div');
+        const strong = document.createElement('strong');
+        strong.textContent = label + ': ';
+        line.appendChild(strong);
+        line.appendChild(document.createTextNode(value));
+        box.appendChild(line);
+      }
+    }
+
+    function finishWizard() {
+      config.url = document.getElementById('serverUrl').value.trim();
+      config.name = document.getElementById('serverName').value.trim() || 'Tab S7+ Server';
+      config.token = document.getElementById('token').value.trim();
+      config.desc = document.getElementById('serverDesc').value.trim();
+
+      localStorage.setItem('hub_url', config.url);
+      localStorage.setItem('hub_name', config.name);
+      localStorage.setItem('hub_desc', config.desc);
+      if (config.token) sessionStorage.setItem('hub_token', config.token);
+
+      loadConfig();
+      showView('dashboard');
+      testConnection();
+    }
+
+    async function testConnection() {
+      const infoEl = document.getElementById('infoText');
+
+      if (!config.url) {
+        setConnStatus('No server URL configured.');
+        return;
+      }
+
+      setConnStatus('Testing connection…');
+      sphere.set('busy');
+
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (config.token) headers['Authorization'] = `Bearer ${config.token}`;
+
+        const res = await fetch(config.url, { method: 'GET', headers, mode: 'cors' });
+
+        if (res.ok || res.status === 401 || res.status === 405 || res.status === 404) {
+          setConnStatus(`Reachable (HTTP ${res.status}).`, 'ok');
+          setIndicator('ok', 'Reachable');
+          infoEl.textContent = 'Server is reachable via the tunnel.';
+        } else {
+          throw new Error(`HTTP ${res.status}`);
+        }
+      } catch (err) {
+        setConnStatus(`Failed: ${err.message}. Check CORS or URL.`, 'error');
+        setIndicator('error', 'Unreachable');
+        infoEl.textContent = 'Could not reach the server.';
+      }
+    }
+
+    function setStatus(state) {
+      const info = document.getElementById('infoText');
+      if (state === 'running') {
+        setIndicator('ok', 'Running');
+        info.textContent = 'Marked as running.';
+      } else {
+        setIndicator('stopped', 'Stopped');
+        info.textContent = 'Marked as stopped.';
+      }
+    }
+
+    function restart() {
+      setStatus('stopped');
+      setTimeout(() => setStatus('running'), 500);
+    }
+
+    // Init
+    loadConfig();
+  </script>
+</body>
+</html>

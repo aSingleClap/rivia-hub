@@ -1,0 +1,8 @@
+{
+  // This name MUST match the existing Worker ("rivia-hub") for Workers Builds to deploy correctly.
+  "name": "rivia-hub",
+  "compatibility_date": "2026-11-15",
+  "assets": {
+    "directory": "./public"
+  }
+}
