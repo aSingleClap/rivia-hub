@@ -1,8 +1,9 @@
 # rivia_gcal.py: Google sign-in and Calendar reads. Plain urllib, no Google library.
 #
-#   python rivia_gcal.py google-login
+#   python rivia_gcal.py google-login [--write]
 #   python rivia_gcal.py events <day>
 #   python rivia_gcal.py signin-check
+#   python rivia_gcal.py backup
 #
 # Client id/secret come from the environment (rivia.sh loads ~/.rivia/.env).
 # The refresh token is saved to ~/.rivia/google_token.json, mode 600.
@@ -36,14 +37,25 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("America/New_York")
 
 SCOPE_READ = "https://www.googleapis.com/auth/calendar.events.readonly"
+SCOPE_CALENDAR_APP = "https://www.googleapis.com/auth/calendar.app.created"
+SCOPE_DRIVE_FILE = "https://www.googleapis.com/auth/drive.file"
+SCOPES_WRITE = (SCOPE_READ, SCOPE_CALENDAR_APP, SCOPE_DRIVE_FILE)
+SCOPE_ALL = " ".join(SCOPES_WRITE)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+DRIVE_BACKUP_NAME = "rivia-scheduler.db"
+DRIVE_BACKUP_MIME = "application/octet-stream"
 HTTP_TIMEOUT = 10
 CLOCK_GAP_S = 120
 TOKEN_SKEW_S = 60
 
 FIX_LOGIN = "Google sign-in expired or was revoked. Run: rivia sched google-login"
+FIX_RELOGIN = (
+    "Google sign-in is missing Drive and calendar write scopes. "
+    "Run: rivia sched google-login --write"
+)
 
 
 class GcalError(Exception):
@@ -64,6 +76,14 @@ def token_url():
 
 def events_url():
     return os.environ.get("RIVIA_GOOGLE_EVENTS_URL", EVENTS_URL)
+
+
+def drive_upload_url():
+    return (os.environ.get("RIVIA_GOOGLE_DRIVE_UPLOAD_URL", DRIVE_UPLOAD_URL) or DRIVE_UPLOAD_URL).rstrip("/")
+
+
+def drive_backup_name():
+    return (os.environ.get("RIVIA_DRIVE_BACKUP_NAME") or DRIVE_BACKUP_NAME).strip() or DRIVE_BACKUP_NAME
 
 
 def dot_dir():
@@ -159,6 +179,52 @@ def clock_status():
     if gap is None:
         return {"clock_gap_s": None, "clock_ok": True}
     return {"clock_gap_s": int(round(gap)), "clock_ok": abs(gap) <= CLOCK_GAP_S}
+
+
+def scope_set(scope):
+    if not scope:
+        return set()
+    return set(str(scope).replace(",", " ").split())
+
+
+def granted_scopes(tokens=None):
+    if tokens is None:
+        try:
+            tokens = load_tokens()
+        except GcalError:
+            return set()
+    return scope_set(tokens.get("scope") or "")
+
+
+def has_scopes(*needed, tokens=None):
+    have = granted_scopes(tokens)
+    return set(needed) <= have
+
+
+def missing_scopes(*needed, tokens=None):
+    have = granted_scopes(tokens)
+    return [s for s in needed if s not in have]
+
+
+def scopes_payload(tokens=None):
+    """Granted OAuth scopes on the saved token. Safe if no token is present."""
+    if tokens is None:
+        try:
+            tokens = load_tokens()
+        except GcalError:
+            return {"scopes": [], "scopes_complete": False}
+    scopes = sorted(granted_scopes(tokens))
+    return {"scopes": scopes, "scopes_complete": has_scopes(*SCOPES_WRITE, tokens=tokens)}
+
+
+def login_scope():
+    """Scopes requested by rivia sched google-login (and google-login --write)."""
+    return SCOPE_ALL
+
+
+def require_scopes(*needed, tokens=None):
+    if missing_scopes(*needed, tokens=tokens):
+        raise GcalError("needs_relogin", FIX_RELOGIN, step="auth")
 
 
 def fail_payload(err: GcalError):
@@ -509,11 +575,14 @@ def wait_for_redirect(queue, timeout=300, stdin=None):
     return payload
 
 
-def google_login(*, open_browser=True, timeout=300, stdin=None, scope=SCOPE_READ):
-    if scope != SCOPE_READ:
+def google_login(*, open_browser=True, timeout=300, stdin=None, scope=None):
+    if scope is None:
+        scope = login_scope()
+    unknown = scope_set(scope) - set(SCOPES_WRITE)
+    if unknown:
         raise GcalError(
             "bad_scope",
-            "Write scopes are step 8. For now the only sign-in is calendar.events.readonly.",
+            "Unknown Google scope.",
             step="input",
         )
     client_creds()
@@ -555,7 +624,11 @@ def google_login(*, open_browser=True, timeout=300, stdin=None, scope=SCOPE_READ
         tokens["expiry"] = expiry
         tokens["scope"] = tokens.get("scope") or scope
         path = save_tokens(tokens)
-        return {"ok": True, "saved": path, "scope": tokens["scope"], "status": clock_status()}
+        status = clock_status()
+        status.update(scopes_payload(tokens))
+        return {"ok": True, "saved": path, "scope": tokens["scope"],
+                "scopes": status["scopes"], "scopes_complete": status["scopes_complete"],
+                "status": status}
     finally:
         try:
             server.shutdown()
@@ -595,6 +668,8 @@ NOTICE_DAY_KEY = "gcal_login_notice_day"
 CHECK_DAY_KEY = "gcal_signin_check_day"
 NOTIFY_TITLE = "Rivia"
 NOTIFY_CONTENT = "Google sign-in expired. Run rivia sched google-login"
+NOTIFY_SCOPE_CONTENT = "Google sign-in needs new scopes. Run rivia sched google-login --write"
+SCOPE_NOTICE_DAY_KEY = "gcal_scope_notice_day"
 NOTIFY_TIMEOUT_S = 8
 DEFAULT_CHECK_HOUR = 5
 DEFAULT_CHECK_MINUTE = 30
@@ -636,13 +711,13 @@ def record_calendar_auth_failure(err, now=None):
         return {"first_today": True, "reason": "no_db", "fix": FIX_LOGIN}
 
 
-def post_signin_expired_notification():
+def post_termux_notification(content, title=NOTIFY_TITLE):
     """Post an Android notification via Termux:API. Never raises.
 
     If termux-notification is missing (a dev box, or Termux:API not
     installed), log and continue so the server stays up.
     """
-    cmd = ["termux-notification", "--title", NOTIFY_TITLE, "--content", NOTIFY_CONTENT]
+    cmd = ["termux-notification", "--title", title, "--content", content]
     try:
         r = subprocess.run(cmd, timeout=NOTIFY_TIMEOUT_S, capture_output=True)
         if r.returncode != 0:
@@ -662,6 +737,10 @@ def post_signin_expired_notification():
         return {"ok": False, "reason": "error"}
 
 
+def post_signin_expired_notification():
+    return post_termux_notification(NOTIFY_CONTENT)
+
+
 def maybe_notify_signin_expired(err, now=None):
     """Record an auth/refresh failure and, on the first one today, notify
     via termux-notification. Safe for plan_day, the 05:30 sign-in check,
@@ -674,6 +753,30 @@ def maybe_notify_signin_expired(err, now=None):
     sent = post_signin_expired_notification()
     rec = dict(rec, notified=bool(sent.get("ok")), notify=sent)
     return rec
+
+
+def maybe_notify_missing_scopes(now=None):
+    """Once per New York day, remind the owner to re-sign in for write/Drive scopes.
+
+    Does not treat the existing calendar read token as expired: reads keep
+    working. Never raises.
+    """
+    day = (now or datetime.now(TZ)).date().isoformat()
+    try:
+        last = _meta_get(SCOPE_NOTICE_DAY_KEY)
+        if last == day:
+            return {"first_today": False, "reason": "already_today", "day": day, "notified": False}
+        try:
+            _meta_set(SCOPE_NOTICE_DAY_KEY, day)
+        except Exception:  # noqa: BLE001
+            pass
+        sent = post_termux_notification(NOTIFY_SCOPE_CONTENT)
+        return {"first_today": True, "reason": "recorded", "day": day,
+                "notified": bool(sent.get("ok")), "notify": sent, "fix": FIX_RELOGIN}
+    except Exception:  # noqa: BLE001
+        sent = post_termux_notification(NOTIFY_SCOPE_CONTENT)
+        return {"first_today": True, "reason": "no_db", "notified": bool(sent.get("ok")),
+                "notify": sent, "fix": FIX_RELOGIN}
 
 
 def _meta_get(key):
@@ -765,15 +868,32 @@ def run_signin_check(now=None, *, mark_ran=True):
     try:
         tmin, tmax = plan_window(today, today, before=0, after=0)
         list_events_between(tmin, tmax)
-        out["message"] = "Google sign-in is valid."
-        out["status"] = clock_status()
+        scopes = scopes_payload()
+        status = clock_status()
+        status.update(scopes)
+        out["status"] = status
+        out["scopes"] = scopes["scopes"]
+        out["scopes_complete"] = scopes["scopes_complete"]
+        if scopes["scopes_complete"]:
+            out["message"] = "Google sign-in is valid."
+            out["needs_relogin"] = False
+        else:
+            out["needs_relogin"] = True
+            out["message"] = (
+                "Google sign-in is valid for calendar reads, but is missing "
+                "Drive and calendar write scopes. Run: rivia sched google-login --write"
+            )
+            rec = maybe_notify_missing_scopes(now=now)
+            out["notified"] = bool(rec.get("notified"))
         checked = True
     except GcalError as e:
         rec = maybe_notify_signin_expired(e, now=now)
         out["ok"] = False
         out["error"] = {"code": e.code, "msg": str(e), "step": e.step}
         out["notified"] = bool(rec.get("notified"))
-        out["status"] = clock_status()
+        status = clock_status()
+        status.update(scopes_payload())
+        out["status"] = status
         checked = True
     except Exception as e:  # noqa: BLE001
         print("rivia: sign-in check failed (%s); continuing." % type(e).__name__, file=sys.stderr)
@@ -797,6 +917,11 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
             now = get_now()
             if signin_check_due(now):
                 run_signin_check(now=now, mark_ran=True)
+                try:
+                    run_drive_backup()
+                except Exception as e:  # noqa: BLE001
+                    print("rivia: daily Drive backup failed (%s); continuing." % type(e).__name__,
+                          file=sys.stderr)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -878,28 +1003,197 @@ def events_for_plan(first_day: date, last_day: date, *, before=2, after=2, now=N
         raise
 
 
+
+def _multipart_related(metadata, raw, mime):
+    boundary = "rivia_" + secrets.token_hex(16)
+    meta = json.dumps(metadata).encode("utf-8")
+    chunks = [
+        b"--" + boundary.encode("ascii") + b"\r\n",
+        b"Content-Type: application/json; charset=UTF-8\r\n\r\n",
+        meta + b"\r\n",
+        b"--" + boundary.encode("ascii") + b"\r\n",
+        ("Content-Type: %s\r\n\r\n" % mime).encode("ascii"),
+        raw,
+        b"\r\n--" + boundary.encode("ascii") + b"--\r\n",
+    ]
+    return b"".join(chunks), "multipart/related; boundary=%s" % boundary
+
+
+def upload_scheduler_db(path, *, file_id=None, name=None, token=None):
+    """Create or update the Drive backup file with drive.file (multipart, urllib)."""
+    if token is None:
+        token, _ = access_token()
+    name = name or drive_backup_name()
+    with open(path, "rb") as f:
+        raw = f.read()
+    body, content_type = _multipart_related(
+        {"name": name, "mimeType": DRIVE_BACKUP_MIME}, raw, DRIVE_BACKUP_MIME)
+    if file_id:
+        url = "%s/%s?uploadType=multipart" % (
+            drive_upload_url(), urllib.parse.quote(str(file_id), safe=""))
+        method = "PATCH"
+    else:
+        url = "%s?uploadType=multipart" % drive_upload_url()
+        method = "POST"
+    status, _, resp = http_request(method, url, headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": content_type,
+    }, data=body)
+    if status in (401, 403):
+        raise GcalError("needs_relogin", FIX_RELOGIN, step="auth")
+    if status not in (200, 201):
+        snippet = (resp or b"")[:200]
+        try:
+            snippet = snippet.decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            snippet = repr(snippet)
+        raise GcalError("drive_http",
+                        "Google Drive upload failed: HTTP %s %s" % (status, snippet),
+                        step="drive")
+    try:
+        data = json.loads(resp.decode())
+    except ValueError:
+        raise GcalError("drive_http", "Google Drive upload returned a non-JSON body.", step="drive")
+    if not data.get("id"):
+        raise GcalError("drive_http", "Google Drive upload did not return a file id.", step="drive")
+    return data
+
+
+def _changes_stamp(con):
+    """How big the settings changes table is, or 0:0 if it isn't there yet."""
+    try:
+        row = con.execute("select count(*), coalesce(max(rowid), 0) from changes").fetchone()
+        return "%s:%s" % (row[0], row[1])
+    except Exception:  # noqa: BLE001
+        return "0:0"
+
+
+def _drive_meta_get(key, default=None):
+    import rivia_planner as rp
+    con = rp.db_open()
+    try:
+        value = rp.get_meta(con, key, default)
+        return value, _changes_stamp(con)
+    finally:
+        con.close()
+
+
+def _drive_meta_set(**pairs):
+    import rivia_planner as rp
+    con = rp.db_open()
+    try:
+        for key, value in pairs.items():
+            rp.set_meta(con, key, value)
+    finally:
+        con.close()
+
+
+def run_drive_backup(*, force=False):
+    """Back up scheduler.db to Drive when rides or settings changes grew.
+
+    After a successful upload, stores drive_file_id in planner meta and later
+    updates that same file. An existing read-only token is left in place;
+    missing drive.file returns needs_relogin instead of crashing. Never
+    talks to the real Google APIs unless a token with drive.file is present.
+    """
+    import rivia_planner as rp
+    out = {"ok": True, "uploaded": False, "written": False}
+    try:
+        try:
+            tokens = load_tokens()
+        except GcalError as e:
+            if e.code in AUTH_FAIL_CODES:
+                maybe_notify_signin_expired(e)
+            raise
+        # Settings changes do not bump the ride counter; force the planner
+        # backup when the changes table grew since the last Drive upload.
+        last_changes = None
+        stamp = "0:0"
+        try:
+            last_changes, stamp = _drive_meta_get("drive_uploaded_changes")
+        except Exception:  # noqa: BLE001
+            pass
+        need_force = bool(force) or (stamp != "0:0" and stamp != (last_changes or "0:0"))
+        backup = rp.cmd_backup({"force": need_force})
+        out["rides"] = backup.get("rides")
+        out["reason"] = backup.get("reason")
+        out["change"] = backup.get("change")
+        if not backup.get("upload"):
+            out["message"] = backup.get("reason") or "No new rides since the last upload."
+            return out
+        require_scopes(SCOPE_DRIVE_FILE, tokens=tokens)
+        file_id = None
+        try:
+            file_id, _ = _drive_meta_get("drive_file_id")
+        except Exception:  # noqa: BLE001
+            file_id = None
+        if not file_id:
+            file_id = None
+        uploaded = upload_scheduler_db(backup["db_path"], file_id=file_id)
+        new_id = uploaded["id"]
+        rp.cmd_backup_uploaded({"change": backup["change"]})
+        try:
+            _, stamp = _drive_meta_get("drive_uploaded_changes")
+            _drive_meta_set(drive_file_id=new_id, drive_uploaded_changes=stamp)
+        except Exception as e:  # noqa: BLE001
+            print("rivia: could not record Drive file id (%s); continuing." % type(e).__name__,
+                  file=sys.stderr)
+        out["uploaded"] = True
+        out["drive_file_id"] = new_id
+        out["name"] = uploaded.get("name") or drive_backup_name()
+        if uploaded.get("modifiedTime"):
+            out["modifiedTime"] = uploaded["modifiedTime"]
+        out["bytes"] = backup.get("bytes")
+        out["sha256"] = backup.get("sha256")
+        out["change"] = backup.get("change")
+        out["message"] = "Uploaded scheduler.db to Drive."
+        return out
+    except GcalError as e:
+        if e.code == "needs_relogin":
+            maybe_notify_missing_scopes()
+        out["ok"] = False
+        out["error"] = {"code": e.code, "msg": str(e), "step": e.step}
+        out["status"] = clock_status()
+        return out
+    except rp.RiviaError as e:
+        out["ok"] = False
+        out["error"] = {"code": e.code, "msg": str(e), "step": getattr(e, "step", None) or "planner"}
+        return out
+    except Exception as e:  # noqa: BLE001
+        print("rivia: Drive backup failed (%s); continuing." % type(e).__name__, file=sys.stderr)
+        out["ok"] = False
+        out["error"] = {"code": "internal", "msg": type(e).__name__, "step": "drive"}
+        return out
+
+
+def cmd_backup(argv=None):
+    force = bool(argv) and "--force" in argv
+    return run_drive_backup(force=force)
+
+
 def cmd_events(day_arg, now=None):
     reset_clock()
     day, asked = resolve_day(day_arg, now=now)
     events = list_events(day)
     status = clock_status()
+    scopes = scopes_payload()
+    status.update(scopes)
     return {
         "ok": True,
         "day": day.isoformat(),
         "asked": asked,
         "events": events,
+        "scopes": scopes["scopes"],
+        "scopes_complete": scopes["scopes_complete"],
         "status": status,
     }
 
 
 def cmd_google_login(argv):
-    if "--write" in argv:
-        raise GcalError(
-            "bad_scope",
-            "Write scopes are step 8. For now run: rivia sched google-login",
-            step="input",
-        )
-    return google_login()
+    # --write is accepted and is the documented path; both forms request
+    # calendar.events.readonly + calendar.app.created + drive.file in one go.
+    # An existing read-only token is left alone until this login completes.
+    return google_login(scope=login_scope())
 
 
 def cmd_signin_check(now=None):
@@ -915,7 +1209,7 @@ def cmd_signin_check(now=None):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__ or "rivia_gcal.py google-login | events <day> | signin-check")
+        print(__doc__ or "rivia_gcal.py google-login [--write] | events <day> | signin-check | backup")
         return 2
     cmd = argv[0]
     try:
@@ -927,9 +1221,11 @@ def main(argv=None):
             out = cmd_events(argv[1])
         elif cmd == "signin-check":
             out = cmd_signin_check()
+        elif cmd == "backup":
+            out = cmd_backup(argv[1:])
         else:
             raise GcalError("bad_command",
-                            "Unknown command: %s. Use google-login, events <day>, or signin-check." % cmd,
+                            "Unknown command: %s. Use google-login, events <day>, signin-check, or backup." % cmd,
                             step="input")
         print(json.dumps(out, indent=1))
         return 0 if out.get("ok") else 1
