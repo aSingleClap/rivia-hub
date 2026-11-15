@@ -79,6 +79,21 @@ def run():
                                  lambda: one(p, 'leave-work', at(17) - 300)))(plan('gym', at(147))))
     check('gym too late for 60 min: flag it',
           lambda: (lambda p: spk(p, 'under the 60-minute floor', lambda: one(p, 'leave-work', at(17) - 300)))(plan('gym', at(90))))
+
+    def t_floor_from_cfg():
+        old = CFG['workoutFloorM']
+        CFG['workoutFloorM'] = 45
+        try:
+            g = plan('gym', at(30))
+            if 'under the 45-minute floor' not in g['speak']:
+                return 'gym speak was ' + g['speak']
+            f = plan('farm', at(30))
+            if 'a 45-minute workout no longer fits' not in f['speak']:
+                return 'farm speak was ' + f['speak']
+            return ''
+        finally:
+            CFG['workoutFloorM'] = old
+    check('farm and gym fallbacks read CFG workoutFloorM', t_floor_from_cfg)
     check('work: says nothing, clears alerts',
           lambda: (lambda p: '' if p['speak'] == '' and p['alerts'] == [] else json.dumps(p))(plan('hmc', at(10))))
     check('home after a shift: leave for the farm at 10:18',

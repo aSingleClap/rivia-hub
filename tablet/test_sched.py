@@ -52,7 +52,7 @@ ok(farm_hmc["data"]["from"] == "farm" and farm_hmc["data"]["to"] == "hmc" and fa
 ok(farm_hmc["data"]["source"] == "your estimate" and farm_hmc["data"]["minutes"] == 20,
    "farm>hmc uses the standing estimate (20)")
 
-missing = sched.ride_time("farm", "pf")
+missing = sched.ride_time("gym", "pf")
 ok(missing["ok"] is False and missing["kind"] == "error", "no source: ok false, kind error")
 ok(missing["error"]["code"] == "need_estimate" and missing["error"]["step"] == "planner",
    "need_maps is mapped to need_estimate (step planner)")
@@ -61,8 +61,8 @@ ok("minutes" not in missing["data"] and "minutes" not in (missing.get("error") o
    "need_estimate never returns a number")
 ok(isinstance(missing["data"].get("pairs"), list) and missing["data"]["pairs"],
    "need_estimate lists the pairs")
-ok(missing["data"]["pairs"][0]["from"] == "farm" and missing["data"]["pairs"][0]["to"] == "pf",
-   "listed pair is farm>pf")
+ok(missing["data"]["pairs"][0]["from"] == "gym" and missing["data"]["pairs"][0]["to"] == "pf",
+   "listed pair is gym>pf")
 
 bad = sched.ride_time("farm", "moon")
 ok(bad["ok"] is False and bad["error"]["code"] == "bad_place" and bad["error"]["step"] == "input",
@@ -80,7 +80,13 @@ try:
     rows = list(con.execute("select name, door, action, model, enabled from tools"))
 finally:
     con.close()
-ok(set(rows) == {("ride_time", "app", "sched.ride_time", 1, 1), ("plan_day", "app", "sched.plan_day", 1, 1)}, "seeded tools: ride_time and plan_day on the app door only")
+ok(set(rows) == {
+    ("ride_time", "app", "sched.ride_time", 1, 1),
+    ("plan_day", "app", "sched.plan_day", 1, 1),
+    ("get_schedule_settings", "app", "sched.get_settings", 1, 1),
+    ("change_schedule_setting", "app", "sched.change_setting", 1, 1),
+    ("undo_schedule_change", "app", "sched.undo_change", 1, 1),
+}, "seeded tools: ride_time, plan_day, and settings tools on the app door only")
 # second open does not duplicate
 tools.open_db().close()
 con = tools.open_db()
@@ -88,7 +94,7 @@ try:
     n = con.execute("select count(*) from tools").fetchone()[0]
 finally:
     con.close()
-ok(n == 2, "seed is idempotent")
+ok(n == 5, "seed is idempotent")
 
 
 # ── plan_day / plan_week against a fake Google on loopback ──
@@ -274,8 +280,12 @@ async def main():
     at, bt = await listed(A, APP), await listed(B, BOT)
     ok("ride_time" in at, "app door lists ride_time")
     ok("plan_day" in at, "app door lists plan_day")
+    ok("get_schedule_settings" in at and "change_schedule_setting" in at and "undo_schedule_change" in at,
+       "app door lists the schedule settings tools")
     ok("plan_week" not in at, "plan_week has no seeded row")
-    ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt,
+    ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt
+       and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
+       and "undo_schedule_change" not in bt,
        "bot door has no scheduler tools")
     schema = getattr(at["ride_time"], "input_schema", None) or at["ride_time"].inputSchema
     props = (schema or {}).get("properties") or {}
@@ -293,9 +303,9 @@ async def main():
        "MCP ride_time matches planner legs")
     ok(ms < 1000, "MCP ride_time returned in under a second (%d ms wall)" % ms)
 
-    need = await call(A, APP, "ride_time", {"from": "farm", "to": "pf"})
+    need = await call(A, APP, "ride_time", {"from": "gym", "to": "pf"})
     ok(need.get("ok") is False and (need.get("error") or {}).get("code") == "need_estimate",
-       "MCP need_estimate for farm>pf")
+       "MCP need_estimate for gym>pf")
     ok("minutes" not in (need.get("data") or {}), "MCP need_estimate has no minutes")
 
     con = sqlite3.connect(os.path.join(os.environ["RIVIA_DIR"], "scheduler.db"))

@@ -4,7 +4,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Union
 
 from fastmcp.tools import tool
 
@@ -118,7 +118,9 @@ def ride_time(from_place: str, to_place: str) -> dict:
         a = _place(from_place, "from")
         b = _place(to_place, "to")
         ref = "%s>%s" % (a, b)
-        out = rp.cmd_legs({"pairs": [[a, b]]})
+        ensure_store()
+        with planner_swap():
+            out = rp.cmd_legs({"pairs": [[a, b]]})
         leg = out["legs"][0]
         return ok_reply("legs", {
             "from": leg["from"], "to": leg["to"],
@@ -166,7 +168,8 @@ def plan_day_sync(day_arg="tomorrow", now=None):
         day, _asked = gcal.resolve_day(day_arg or "tomorrow", now=now)
         ref = day.isoformat()
         events = gcal.events_for_plan(day, day, before=2, after=2, now=now)
-        out = _plan_days([day], events, now=now)
+        ensure_store(now=now)
+        out = _plan_one(day, events, now=now)
         rec = out["days"][0]
         data = {
             "day": rec["day"], "status": rec["status"], "shift": rec["shift"],
@@ -196,14 +199,19 @@ def plan_week_sync(now=None):
         start = _today(now)
         days = [start + timedelta(days=i) for i in range(7)]
         events = gcal.events_for_plan(days[0], days[-1], before=2, after=2, now=now)
-        out = _plan_days(days, events, now=now)
-        week = []
-        for rec in out["days"]:
+        ensure_store(now=now)
+        week, ride_notes = [], []
+        for day in days:
+            one = _plan_one(day, events, now=now)
+            rec = one["days"][0]
             week.append({
                 "day": rec["day"], "status": rec["status"],
                 "problems": rec["problems"], "message": rec.get("message"),
             })
-        return ok_reply("plan", {"days": week, "written": False},
+            for note in one.get("rides") or []:
+                if note not in ride_notes:
+                    ride_notes.append(note)
+        return ok_reply("plan", {"days": week, "rides": ride_notes, "written": False},
                         ref=days[0].isoformat(), message=None)
     except gcal.GcalError as e:
         return _gcal_fail(e, ref=None)
@@ -227,6 +235,835 @@ async def plan_day(day: str = "tomorrow") -> dict:
 async def plan_week() -> dict:
     """The next seven days for Jordan. Reads the calendar; never writes it."""
     return await asyncio.to_thread(plan_week_sync)
+
+
+# ── Settings store (step 7a) ────────────────────────────────────────────
+import secrets
+import sys
+import threading
+from contextlib import contextmanager
+from datetime import date
+
+_LOCK = threading.RLock()
+_seeding = False
+
+_CFG_DEFAULT = dict(rp.CFG)
+_LEGS_DEFAULT = dict(rp.MEASURED_LEGS)
+_GYM_DEFAULT = {k: dict(v) for k, v in rp.GYM_HOURS.items()}
+
+SETTINGS_SCHEMA = """
+create table if not exists settings(
+    key text primary key, value text not null, updated text not null, change_id text);
+create table if not exists overrides(
+    day text not null, key text not null, value text not null,
+    created text not null, change_id text, primary key (day, key));
+create table if not exists changes(
+    change_id text primary key, created text not null, door text, kind text,
+    scope text, day text, key text, old text, new text, preview text,
+    status text, decided text, reason text, request_id text);
+"""
+
+# Section 7 ranges (accepted). A range can't be widened over the network.
+SETTINGS = {
+    "arrive_early_minutes":  {"planner": "bufferM",        "default": 10,   "min": 0,    "max": 30,   "type": "int",   "unit": "minutes", "label": "Arrive early",             "day": True,  "ask": True,  "group": "schedule"},
+    "prework_minutes":       {"planner": "preworkM",       "default": 30,   "min": 0,    "max": 90,   "type": "int",   "unit": "minutes", "label": "Pre-work",                 "day": True,  "ask": True,  "group": "schedule"},
+    "prework_floor_minutes": {"planner": "preworkFloorM",  "default": 15,   "min": 0,    "max": 60,   "type": "int",   "unit": "minutes", "label": "Pre-work floor",           "day": True,  "ask": True,  "group": "schedule"},
+    "workout_minutes":       {"planner": "workoutM",       "default": 120,  "min": 30,   "max": 180,  "type": "int",   "unit": "minutes", "label": "Workout",                  "day": True,  "ask": True,  "group": "schedule"},
+    "workout_floor_minutes": {"planner": "workoutFloorM",  "default": 60,   "min": 15,   "max": 120,  "type": "int",   "unit": "minutes", "label": "Workout floor",            "day": True,  "ask": True,  "group": "schedule"},
+    "farm_minutes":          {"planner": "farmM",          "default": 45,   "min": 10,   "max": 180,  "type": "int",   "unit": "minutes", "label": "Farm time",                "day": True,  "ask": True,  "group": "schedule"},
+    "alert_lead_minutes":    {"planner": "leadM",          "default": 5,    "min": 0,    "max": 30,   "type": "int",   "unit": "minutes", "label": "Alert lead",               "day": True,  "ask": True,  "group": "schedule"},
+    "wind_down_minutes":     {"planner": "windDownM",      "default": 60,   "min": 0,    "max": 180,  "type": "int",   "unit": "minutes", "label": "Wind-down",                "day": True,  "ask": True,  "group": "schedule"},
+    "wake_up_minutes":       {"planner": "wakeUpM",        "default": 60,   "min": 15,   "max": 180,  "type": "int",   "unit": "minutes", "label": "Wake-up",                  "day": True,  "ask": True,  "group": "schedule"},
+    "sleep_target_hours":    {"planner": "sleepTargetH",   "default": 8,    "min": 4,    "max": 10,   "type": "int",   "unit": "hours",   "label": "Sleep target",             "day": True,  "ask": True,  "group": "schedule"},
+    "place_radius_meters":   {"planner": "placeRadiusM",   "default": 400,  "min": 50,   "max": 2000, "type": "int",   "unit": "meters",  "label": "Place radius",             "day": False, "ask": False, "group": "system"},
+    "overnight_hours":       {"planner": "overnightH",     "default": 8,    "min": 4,    "max": 16,   "type": "int",   "unit": "hours",   "label": "Overnight horizon",        "day": False, "ask": False, "group": "system"},
+    "home_lookahead_hours":  {"planner": "homeLookaheadH", "default": 20,   "min": 8,    "max": 36,   "type": "int",   "unit": "hours",   "label": "Home lookahead",           "day": False, "ask": False, "group": "system"},
+    "learn_keep_rides":      {"planner": "learnKeep",      "default": 10,   "min": 3,    "max": 50,   "type": "int",   "unit": "rides",   "label": "Learned rides to keep",    "day": False, "ask": False, "group": "system"},
+    "learn_min_rides":       {"planner": "learnMin",       "default": 3,    "min": 1,    "max": 10,   "type": "int",   "unit": "rides",   "label": "Learned rides minimum",    "day": False, "ask": False, "group": "system"},
+    "learn_rank":            {"planner": "learnRank",      "default": 0.75, "min": 0.5,  "max": 1.0,  "type": "float", "unit": "rank",    "label": "Learned ride rank",       "day": False, "ask": False, "group": "system"},
+    "ride_max_hours":        {"planner": "rideMaxH",       "default": 3,    "min": 1,    "max": 8,    "type": "int",   "unit": "hours",   "label": "Ride max hours",           "day": False, "ask": False, "group": "system"},
+    "clean_low_ratio":       {"planner": "cleanLow",       "default": 0.25, "min": 0.05, "max": 0.9,  "type": "float", "unit": "ratio",   "label": "Clean-ride low ratio",    "day": False, "ask": False, "group": "system"},
+    "clean_high_ratio":      {"planner": "cleanHigh",      "default": 2,    "min": 1.1,  "max": 5,    "type": "float", "unit": "ratio",   "label": "Clean-ride high ratio",   "day": False, "ask": False, "group": "system"},
+}
+
+RIDE_PLACES = ("farm", "gym", "hmc", "home", "pf")  # alphabetical
+GYM_HOUR_FIELDS = {
+    "weekday_open": "weekdayOpen", "weekday_close": "weekdayClose",
+    "weekend_open": "weekendOpen", "weekend_close": "weekendClose",
+}
+SEED_ESTIMATES = (("ride_estimate.farm_pf", 17), ("ride_estimate.hmc_pf", 15))
+STANDING_UNAVAILABLE = "Standing setting changes need approval, which is not available yet."
+DAY_WINDOW_DAYS = 14
+DUPLICATE_S = 60
+UNDO_S = 24 * 3600
+
+GET_SETTINGS_DESCRIPTION = (
+    "Jordan's schedule settings for a day: each key's value, default, unit, range, "
+    "and whether it comes from the default, a standing value, or a day override."
+)
+CHANGE_SETTING_DESCRIPTION = (
+    "Change one of Jordan's schedule settings. scope is day (that date only, today "
+    "through 14 days ahead) or standing. A standing change from this door is not "
+    "applied. Out-of-range or inconsistent values are refused with the reason."
+)
+UNDO_CHANGE_DESCRIPTION = (
+    "Undo a schedule setting change. With no change_id, undo the latest change made "
+    "through this door in the last 24 hours. Restores the old value and logs a new change."
+)
+
+
+class SettingsError(Exception):
+    def __init__(self, code, msg, *, step="settings", extra=None):
+        super().__init__(msg)
+        self.code = code
+        self.step = step
+        self.extra = extra or {}
+
+
+def _today_date(now=None):
+    if now is None:
+        return datetime.now(gcal.TZ).date()
+    if isinstance(now, date) and not isinstance(now, datetime):
+        return now
+    if hasattr(now, "astimezone"):
+        return now.astimezone(gcal.TZ).date()
+    if hasattr(now, "date"):
+        return now.date()
+    return date.fromisoformat(str(now)[:10])
+
+
+def _as_date(day):
+    if day is None:
+        return None
+    if isinstance(day, datetime):
+        return day.astimezone(gcal.TZ).date() if day.tzinfo else day.date()
+    if isinstance(day, date):
+        return day
+    return date.fromisoformat(str(day)[:10])
+
+
+def _store_value(v):
+    if isinstance(v, bool):
+        raise SettingsError("bad_value", "A setting value cannot be true or false.", step="input")
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return json.dumps(v, separators=(",", ":"))
+
+
+def _load_value(text):
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return float(text)
+
+
+def _coerce(spec, value):
+    typ = spec["type"]
+    if typ == "int":
+        if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("true", "false")):
+            raise SettingsError("bad_value", "Expected a whole number.", step="input")
+        try:
+            if isinstance(value, str) and "." in value:
+                f = float(value)
+                if not f.is_integer():
+                    raise ValueError
+                value = int(f)
+            else:
+                value = int(value)
+        except (TypeError, ValueError):
+            raise SettingsError("bad_value", "Expected a whole number.", step="input") from None
+    else:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise SettingsError("bad_value", "Expected a number.", step="input") from None
+        if typ == "float" and value.is_integer() and spec.get("keep_int"):
+            value = int(value)
+    lo, hi = spec["min"], spec["max"]
+    if value < lo or value > hi:
+        raise SettingsError(
+            "out_of_range",
+            "%s must be between %s and %s (got %s)." % (spec.get("label") or "This setting", lo, hi, value),
+            step="settings",
+        )
+    return int(value) if typ == "int" else value
+
+
+def _parse_key(key):
+    """Return a descriptor for a catalog key, or raise SettingsError."""
+    key = (key or "").strip()
+    if key in SETTINGS:
+        spec = dict(SETTINGS[key], key=key, family="scalar")
+        return spec
+    if key.startswith("ride_estimate."):
+        rest = key[len("ride_estimate."):]
+        parts = rest.split("_")
+        if len(parts) != 2 or parts[0] not in RIDE_PLACES or parts[1] not in RIDE_PLACES:
+            raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
+        a, b = parts
+        if a >= b:
+            raise SettingsError(
+                "bad_key",
+                "Ride estimate place ids must be in alphabetical order (use ride_estimate.%s_%s)." % tuple(sorted((a, b))),
+                step="input",
+            )
+        if a == b:
+            raise SettingsError("bad_key", "A ride estimate needs two different places.", step="input")
+        return {
+            "key": key, "family": "ride", "a": a, "b": b,
+            "default": None, "min": 1, "max": 180, "type": "int", "unit": "minutes",
+            "label": "Ride estimate %s–%s" % (a, b), "day": False, "ask": True, "group": "schedule",
+        }
+    if key.startswith("gym_hours."):
+        parts = key.split(".")
+        if len(parts) != 3 or parts[1] not in ("gym", "pf") or parts[2] not in GYM_HOUR_FIELDS:
+            raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
+        return {
+            "key": key, "family": "gym", "gym_id": parts[1], "field": GYM_HOUR_FIELDS[parts[2]],
+            "slot": parts[2], "default": _GYM_DEFAULT[parts[1]][GYM_HOUR_FIELDS[parts[2]]],
+            "min": 0, "max": 24, "type": "float", "unit": "hour",
+            "label": "%s %s" % ("Planet Fitness" if parts[1] == "pf" else "University Fitness Center", parts[2].replace("_", " ")),
+            "day": False, "ask": True, "group": "schedule",
+        }
+    if key.startswith("place."):
+        raise SettingsError("bad_key", "Place settings can only be changed from the web app.", step="input")
+    raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
+
+
+def _ride_keys():
+    out = []
+    for i, a in enumerate(RIDE_PLACES):
+        for b in RIDE_PLACES[i + 1:]:
+            out.append("ride_estimate.%s_%s" % (a, b))
+    return out
+
+
+def _gym_keys():
+    out = []
+    for gid in ("gym", "pf"):
+        for slot in GYM_HOUR_FIELDS:
+            out.append("gym_hours.%s.%s" % (gid, slot))
+    return out
+
+
+def _keys_for_group(group):
+    group = (group or "schedule").strip().lower()
+    keys = list(SETTINGS)
+    keys.extend(_ride_keys())
+    keys.extend(_gym_keys())
+    if group in ("all", "*"):
+        return keys
+    return [k for k in keys if _parse_key(k)["group"] == group]
+
+
+def ensure_settings_schema(con):
+    con.executescript(SETTINGS_SCHEMA)
+
+
+def _purge_overrides(con, today=None):
+    today = _today_date(today)
+    yesterday = (today - timedelta(days=1)).isoformat()
+    con.execute("delete from overrides where day < ?", (yesterday,))
+
+
+def _standing_row(con, key):
+    return con.execute("select value, change_id, updated from settings where key=?", (key,)).fetchone()
+
+
+def _override_row(con, day, key):
+    return con.execute("select value, change_id, created from overrides where day=? and key=?",
+                       (day, key)).fetchone()
+
+
+def _resolved(con, key, day=None):
+    """Return (value, source) for a key on a day: override, standing, or default."""
+    spec = _parse_key(key)
+    if day is not None:
+        row = _override_row(con, _as_date(day).isoformat(), key)
+        if row:
+            return _load_value(row[0]), "day"
+    row = _standing_row(con, key)
+    if row:
+        return _load_value(row[0]), "standing"
+    return spec["default"], "default"
+
+
+def _all_resolved(con, day=None, extra=None):
+    out = {}
+    for key in list(SETTINGS) + _ride_keys() + _gym_keys():
+        val, src = _resolved(con, key, day=day)
+        out[key] = (val, src)
+    if extra:
+        for key, val in extra.items():
+            out[key] = (val, "proposed")
+    return out
+
+
+def _snapshot():
+    return {
+        "cfg": dict(rp.CFG),
+        "legs": dict(rp.MEASURED_LEGS),
+        "gym": {k: dict(v) for k, v in rp.GYM_HOURS.items()},
+    }
+
+
+def _restore(snap):
+    rp.CFG.clear()
+    rp.CFG.update(snap["cfg"])
+    rp.MEASURED_LEGS.clear()
+    rp.MEASURED_LEGS.update(snap["legs"])
+    for gid, hours in snap["gym"].items():
+        rp.GYM_HOURS[gid].clear()
+        rp.GYM_HOURS[gid].update(hours)
+
+
+def _apply_one(key, value):
+    if value is None:
+        return
+    spec = _parse_key(key)
+    if spec["family"] == "scalar":
+        rp.CFG[spec["planner"]] = value
+    elif spec["family"] == "ride":
+        rp.MEASURED_LEGS[rp.leg_key(spec["a"], spec["b"])] = value
+    elif spec["family"] == "gym":
+        rp.GYM_HOURS[spec["gym_id"]][spec["field"]] = value
+
+
+def _apply_resolved(resolved):
+    # Start from code defaults, then overlay any non-default values.
+    rp.CFG.clear()
+    rp.CFG.update(_CFG_DEFAULT)
+    rp.MEASURED_LEGS.clear()
+    rp.MEASURED_LEGS.update(_LEGS_DEFAULT)
+    for gid, hours in _GYM_DEFAULT.items():
+        rp.GYM_HOURS[gid].clear()
+        rp.GYM_HOURS[gid].update(hours)
+    for key, (val, _src) in resolved.items():
+        if val is not None:
+            _apply_one(key, val)
+
+
+@contextmanager
+def planner_swap(day=None, extra=None, now=None, con=None):
+    """Hold the settings lock, swap this day's values into the planner, restore after."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        with _LOCK:
+            snap = _snapshot()
+            try:
+                _apply_resolved(_all_resolved(con, day=day, extra=extra))
+                yield
+            finally:
+                _restore(snap)
+    finally:
+        if close:
+            con.close()
+
+
+def _consistency_problems(resolved):
+    def v(key):
+        return resolved[key][0]
+
+    problems = []
+    if v("prework_floor_minutes") > v("prework_minutes"):
+        problems.append("The pre-work floor cannot be above the pre-work target.")
+    if v("workout_floor_minutes") > v("workout_minutes"):
+        problems.append("The workout floor cannot be above the workout target.")
+    if v("learn_min_rides") > v("learn_keep_rides"):
+        problems.append("learn_min_rides cannot be above learn_keep_rides.")
+    if not (v("clean_low_ratio") < 1 < v("clean_high_ratio")):
+        problems.append("clean_low_ratio must be under 1 and clean_high_ratio must be over 1.")
+    if v("overnight_hours") >= v("home_lookahead_hours"):
+        problems.append("overnight_hours must be under home_lookahead_hours.")
+    for gid, name in (("gym", "The University Fitness Center"), ("pf", "Planet Fitness")):
+        for kind in ("weekday", "weekend"):
+            op, cl = v("gym_hours.%s.%s_open" % (gid, kind)), v("gym_hours.%s.%s_close" % (gid, kind))
+            if op is not None and cl is not None and op >= cl:
+                problems.append("%s %s opening must be before closing." % (name, kind))
+    return problems
+
+
+def _shift(start_iso, end_iso, title="Work Shift - HMC"):
+    start = rp.to_epoch(start_iso, "start")
+    end = rp.to_epoch(end_iso, "end")
+    return {"start": start, "end": end, "title": title}
+
+
+def _sample_workdays():
+    """Three sample workdays for the dry run (section 7)."""
+    mon = _shift("2026-10-05T14:30:00-04:00", "2026-10-05T23:00:00-04:00")
+    tue = _shift("2026-10-06T14:30:00-04:00", "2026-10-06T23:00:00-04:00")
+    sat = _shift("2026-12-05T14:30:00-05:00", "2026-12-05T23:00:00-05:00")
+    return [
+        ("weekday after a day off", mon, None, "gym"),
+        ("weekday after a shift", tue, mon, "gym"),
+        ("Saturday at Planet Fitness", sat, None, "pf"),
+    ]
+
+
+def _sample_problems(shift, prev, gym_id):
+    leg = rp.Legs(rides=[])
+    try:
+        legs, _note = rp.ride_table(gym_id, leg)
+        leg.check()
+    except rp.RiviaError as e:
+        if e.code == "need_maps":
+            return None
+        raise
+    plan = rp.build_workday(shift, prev, legs, gym_id)
+    return list(plan["problems"]) + rp.check_day(plan["blocks"], shift)
+
+
+def _dry_run(con, day, extra):
+    """Return new problems the change would add, or None if the Saturday sample was skipped only."""
+    added = []
+    for name, shift, prev, gym_id in _sample_workdays():
+        with planner_swap(day=day, con=con):
+            before = _sample_problems(shift, prev, gym_id)
+        with planner_swap(day=day, extra=extra, con=con):
+            after = _sample_problems(shift, prev, gym_id)
+        if before is None or after is None:
+            continue  # Saturday (or any sample) skipped while ride estimates are missing
+        new = [p for p in after if p not in before]
+        if new:
+            added.append({"sample": name, "problems": new})
+    return added
+
+
+def _new_id():
+    return "chg_" + secrets.token_hex(8)
+
+
+def _log_change(con, **row):
+    con.execute(
+        "insert into changes(change_id, created, door, kind, scope, day, key, old, new, preview, status, decided, reason, request_id) "
+        "values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (row["change_id"], row["created"], row.get("door"), row.get("kind") or "setting",
+         row.get("scope"), row.get("day"), row.get("key"),
+         row.get("old"), row.get("new"), row.get("preview"),
+         row.get("status"), row.get("decided"), row.get("reason"), row.get("request_id")),
+    )
+
+
+def _row_to_result(row, *, duplicate=False, in_use=None):
+    data = {
+        "change_id": row[0], "key": row[6], "scope": row[4], "day": row[5],
+        "old": _load_value(row[7]) if row[7] is not None else None,
+        "value": _load_value(row[8]) if row[8] is not None else None,
+        "status": row[10], "duplicate": duplicate,
+        "source": None,
+    }
+    if row[11]:
+        try:
+            extra = json.loads(row[9]) if row[9] else {}
+        except ValueError:
+            extra = {}
+        data.update({k: extra[k] for k in ("source", "in_use", "in_use_source") if k in extra})
+    if in_use is not None:
+        data["in_use"] = in_use
+    return data
+
+
+def _find_duplicate(con, door, key, value_s, scope, day, request_id, now_s):
+    if request_id:
+        row = con.execute(
+            "select * from changes where request_id=? order by created desc, rowid desc limit 1",
+            (request_id,),
+        ).fetchone()
+        if row:
+            return row
+    since = rp.iso(now_s - DUPLICATE_S)
+    day_s = day or ""
+    row = con.execute(
+        "select * from changes where door=? and key=? and new=? and ifnull(scope,'')=? "
+        "and ifnull(day,'')=? and created>=? order by created desc, rowid desc limit 1",
+        (door, key, value_s, scope or "", day_s, since),
+    ).fetchone()
+    return row
+
+
+def _ride_in_use(a, b):
+    mins, src = rp.Legs(rides=None).info(a, b)
+    yours = src == "your estimate"
+    return {"in_use": bool(yours and mins is not None), "in_use_source": src, "minutes": mins}
+
+
+def _source_after(con, key, day, scope):
+    val, src = _resolved(con, key, day=day if scope == "day" else None)
+    # After a standing apply, ignore a day override for the 'now comes from' of the standing value itself;
+    # the result describes the value that was just written.
+    if scope == "standing":
+        row = _standing_row(con, key)
+        return ("standing" if row else "default")
+    return src
+
+
+def _setting_result(con, key, day, scope, change_id, old, value, duplicate=False, status="applied"):
+    source = _source_after(con, key, day, scope)
+    data = {
+        "change_id": change_id, "key": key, "value": value, "old": old,
+        "scope": scope, "day": day, "status": status, "source": source,
+        "duplicate": duplicate,
+    }
+    spec = _parse_key(key)
+    if spec["family"] == "ride":
+        with planner_swap(day=day, con=con):
+            info = _ride_in_use(spec["a"], spec["b"])
+        data["in_use"] = info["in_use"]
+        data["in_use_source"] = info["in_use_source"]
+    return data
+
+
+def change_setting_sync(key, value, scope, day=None, reason=None, request_id=None,
+                        door="app", now=None, con=None):
+    """Run the four checks and, if they pass, apply a day change or a standing
+    change from a door that may apply one. App-door standing changes are refused
+    (G7) until the 7b queue exists."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        return _change_setting(con, key, value, scope, day=day, reason=reason,
+                               request_id=request_id, door=door, now=now)
+    finally:
+        if close:
+            con.close()
+
+
+def _change_setting(con, key, value, scope, day=None, reason=None, request_id=None,
+                    door="app", now=None):
+    now = now or datetime.now(gcal.TZ)
+    now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+    today = _today_date(now)
+    scope = (scope or "").strip().lower()
+    door = (door or "app").strip().lower()
+    if scope not in ("day", "standing"):
+        raise SettingsError("bad_scope", "scope must be day or standing.", step="input")
+    spec = _parse_key(key)
+    key = spec["key"]
+    coerced = _coerce(spec, value)
+    value_s = _store_value(coerced)
+    day_s = None
+    if scope == "day":
+        if not spec["day"]:
+            raise SettingsError("bad_scope", "%s can only be a standing value, not a day change." % key, step="input")
+        if not day:
+            raise SettingsError("bad_day", "A day-scope change needs a day (today, tomorrow, or YYYY-MM-DD).", step="input")
+        if isinstance(day, str):
+            try:
+                day_d, _asked = gcal.resolve_day(day, now=now)
+            except Exception as e:
+                raise SettingsError("bad_day", "Not a day: %s." % day, step="input") from e
+        else:
+            day_d = _as_date(day)
+        if day_d < today or day_d > today + timedelta(days=DAY_WINDOW_DAYS):
+            raise SettingsError(
+                "bad_day",
+                "A day change must be today through %d days ahead (got %s)." % (DAY_WINDOW_DAYS, day_d.isoformat()),
+                step="input",
+            )
+        day_s = day_d.isoformat()
+    elif day:
+        # standing ignores a stray day
+        day_s = None
+
+    # Check 1 continued: this door may change this key at this scope.
+    if door == "app" and scope == "standing":
+        raise SettingsError("standing_not_available", STANDING_UNAVAILABLE, step="settings")
+    if door == "app" and not spec.get("ask", True) and not spec["day"]:
+        raise SettingsError("bad_key", "This setting cannot be changed from the app door.", step="input")
+
+    dup = _find_duplicate(con, door, key, value_s, scope, day_s, request_id, now_s)
+    if dup:
+        data = _setting_result(con, key, dup[5], scope, dup[0], _load_value(dup[7]) if dup[7] else None,
+                               _load_value(dup[8]) if dup[8] else None, duplicate=True, status=dup[10])
+        return data
+
+    old, _old_src = _resolved(con, key, day=day_s)
+    extra = {key: coerced}
+
+    # Check 2: consistent with the others.
+    resolved = _all_resolved(con, day=day_s, extra=extra)
+    problems = _consistency_problems(resolved)
+    if problems:
+        raise SettingsError("inconsistent", problems[0], step="settings", extra={"problems": problems})
+
+    # Check 3: dry run on three sample days.
+    added = _dry_run(con, day_s, extra)
+    if added:
+        flat = []
+        for item in added:
+            flat.extend(item["problems"])
+        raise SettingsError(
+            "breaks_plan",
+            "That change would add problems on a sample day: %s" % " ".join(flat),
+            step="settings", extra={"samples": added, "problems": flat},
+        )
+
+    # Check 4: log, then apply.
+    change_id = _new_id()
+    created = rp.iso(now_s)
+    if scope == "standing":
+        con.execute(
+            "insert or replace into settings(key, value, updated, change_id) values(?,?,?,?)",
+            (key, value_s, created, change_id),
+        )
+    else:
+        con.execute(
+            "insert or replace into overrides(day, key, value, created, change_id) values(?,?,?,?,?)",
+            (day_s, key, value_s, created, change_id),
+        )
+    data = _setting_result(con, key, day_s, scope, change_id, old, coerced, duplicate=False)
+    preview = json.dumps({k: data[k] for k in ("source", "in_use", "in_use_source") if k in data})
+    _log_change(con, change_id=change_id, created=created, door=door, kind="setting",
+                scope=scope, day=day_s, key=key, old=_store_value(old) if old is not None else None,
+                new=value_s, preview=preview, status="applied", decided=created,
+                reason=reason, request_id=request_id)
+    data["reason"] = reason
+    return data
+
+
+def undo_change_sync(change_id=None, door="app", now=None, con=None):
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        return _undo_change(con, change_id=change_id, door=door, now=now)
+    finally:
+        if close:
+            con.close()
+
+
+def _undo_change(con, change_id=None, door="app", now=None):
+    now = now or datetime.now(gcal.TZ)
+    now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
+    door = (door or "app").strip().lower()
+    cid = (change_id or "").strip() or None
+    if cid:
+        row = con.execute("select * from changes where change_id=?", (cid,)).fetchone()
+        if not row:
+            raise SettingsError("bad_change_id", "No change with id %s." % cid, step="input")
+    else:
+        since = rp.iso(now_s - UNDO_S)
+        row = con.execute(
+            "select * from changes where door=? and status='applied' and created>=? "
+            "order by created desc, rowid desc limit 1",
+            (door, since),
+        ).fetchone()
+        if not row:
+            raise SettingsError("no_undo", "There is no change from this door in the last 24 hours to undo.", step="settings")
+    cid, created, row_door, kind, scope, day_s, key, old_s, new_s, preview, status, decided, reason, request_id = row
+    if status != "applied":
+        raise SettingsError("bad_change", "Change %s cannot be undone (status is %s)." % (cid, status), step="settings")
+    # Undoing a standing change through the app door is itself standing, so refuse until 7b.
+    if scope == "standing" and door == "app":
+        raise SettingsError("standing_not_available", STANDING_UNAVAILABLE, step="settings")
+    old = _load_value(old_s) if old_s is not None else None
+    if scope == "standing":
+        if old is None:
+            con.execute("delete from settings where key=?", (key,))
+        else:
+            # Restore through the same checks.
+            return _change_setting(con, key, old, "standing", reason="undo %s" % cid, door=door, now=now)
+    else:
+        if not day_s:
+            raise SettingsError("bad_change", "Change %s has no day to restore." % cid, step="settings")
+        # Remove this override first. If that already restores `old` (the default
+        # or a standing value), we are done; otherwise write the previous override back.
+        con.execute("delete from overrides where day=? and key=?", (day_s, key))
+        current, _src = _resolved(con, key, day=day_s)
+        if old is not None and current != old:
+            out = _change_setting(con, key, old, "day", day=day_s, reason="undo %s" % cid, door=door, now=now)
+            out["undo_of"] = cid
+            con.execute("update changes set status='undone', decided=? where change_id=?", (rp.iso(now_s), cid))
+            return out
+        undo_id = _new_id()
+        created_s = rp.iso(now_s)
+        _log_change(con, change_id=undo_id, created=created_s, door=door, kind="undo",
+                    scope=scope, day=day_s, key=key, old=new_s, new=_store_value(current) if current is not None else None,
+                    preview=json.dumps({"undo_of": cid}), status="applied", decided=created_s,
+                    reason="undo %s" % cid, request_id=None)
+        con.execute("update changes set status='undone', decided=? where change_id=?", (created_s, cid))
+        val, src = _resolved(con, key, day=day_s)
+        return {
+            "change_id": undo_id, "key": key, "value": val, "old": _load_value(new_s),
+            "scope": scope, "day": day_s, "status": "applied", "source": src,
+            "duplicate": False, "undo_of": cid,
+        }
+    # standing restore when old is None (delete standing row)
+    undo_id = _new_id()
+    created_s = rp.iso(now_s)
+    _log_change(con, change_id=undo_id, created=created_s, door=door, kind="undo",
+                scope="standing", day=None, key=key, old=new_s, new=None,
+                preview=json.dumps({"undo_of": cid}), status="applied", decided=created_s,
+                reason="undo %s" % cid, request_id=None)
+    con.execute("update changes set status='undone', decided=? where change_id=?", (created_s, cid))
+    val, src = _resolved(con, key, day=None)
+    return {
+        "change_id": undo_id, "key": key, "value": val, "old": _load_value(new_s),
+        "scope": "standing", "day": None, "status": "applied", "source": src,
+        "duplicate": False, "undo_of": cid,
+    }
+
+
+def get_settings_sync(group="schedule", day=None, now=None, con=None):
+    close = False
+    if con is None:
+        con = rp.db_open()
+        ensure_store(con)
+        close = True
+    try:
+        today = _today_date(now)
+        day_d = None
+        if day:
+            if isinstance(day, str) and not (len(day) >= 10 and day[4] == "-"):
+                day_d, _asked = gcal.resolve_day(day, now=now)
+            else:
+                day_d = _as_date(day)
+        else:
+            day_d = today
+        day_s = day_d.isoformat()
+        items = []
+        for key in _keys_for_group(group):
+            spec = _parse_key(key)
+            val, src = _resolved(con, key, day=day_s)
+            item = {
+                "key": key, "label": spec["label"], "value": val,
+                "default": spec["default"], "unit": spec["unit"],
+                "range": [spec["min"], spec["max"]], "source": src,
+                "day_change": bool(spec["day"]),
+            }
+            if src == "day":
+                item["override_day"] = day_s
+            if spec["family"] == "ride" and val is not None:
+                with planner_swap(day=day_s, con=con):
+                    info = _ride_in_use(spec["a"], spec["b"])
+                item["in_use"] = info["in_use"]
+                item["in_use_source"] = info["in_use_source"]
+            items.append(item)
+        return {"day": day_s, "group": (group or "schedule"), "settings": items}
+    finally:
+        if close:
+            con.close()
+
+
+def _seed_weekend_estimates(con, now=None):
+    """Idempotent G6 seed: ride_estimate.farm_pf=17 and hmc_pf=15 as standing values."""
+    global _seeding
+    seeded = []
+    _seeding = True
+    try:
+        for key, val in SEED_ESTIMATES:
+            if _standing_row(con, key) is not None:
+                continue
+            data = _change_setting(con, key, val, "standing", reason="auto-seed on first start",
+                                   door="system", now=now)
+            seeded.append(data)
+            print("rivia: seeded %s=%s (standing)" % (key, val), file=sys.stderr)
+    finally:
+        _seeding = False
+    return seeded
+
+
+def ensure_store(con=None, now=None):
+    """Create settings tables, drop stale day overrides, and seed 17/15 once."""
+    close = False
+    if con is None:
+        con = rp.db_open()
+        close = True
+    try:
+        ensure_settings_schema(con)
+        _purge_overrides(con, today=now)
+        if not _seeding:
+            _seed_weekend_estimates(con, now=now)
+        return con
+    finally:
+        if close:
+            con.close()
+
+
+def _settings_fail(err):
+    data = dict(err.extra) if getattr(err, "extra", None) else {}
+    return fail(err.code, str(err), getattr(err, "step", "settings"), data=data)
+
+
+def _plan_one(day, events, now=None, con=None):
+    day_s = day.isoformat() if hasattr(day, "isoformat") else day
+    inp = {"days": [day_s], "events": events}
+    if now is not None:
+        inp["now"] = now
+    with planner_swap(day=day, now=now, con=con):
+        return rp.cmd_plan(inp)
+
+
+def get_settings_tool(group: str = "schedule", day: str | None = None) -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = get_settings_sync(group=group or "schedule", day=day)
+        return ok_reply("settings", data, ref=data.get("day"))
+    except SettingsError as e:
+        return _settings_fail(e)
+    except gcal.GcalError as e:
+        return fail(e.code, str(e), e.step or "input")
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "settings")
+
+
+get_settings = tool(get_settings_tool)
+
+
+def change_setting_tool(key: str, scope: str, value: Union[str, int, float],
+                        day: str | None = None, reason: str | None = None,
+                        request_id: str | None = None) -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = change_setting_sync(key, value, scope, day=day, reason=reason,
+                                   request_id=request_id, door="app")
+        kind = "change" if data.get("status") == "applied" else "pending"
+        return ok_reply(kind, data, ref=data.get("change_id"))
+    except SettingsError as e:
+        return _settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "settings")
+
+
+change_setting = tool(change_setting_tool)
+
+
+def undo_change_tool(change_id: str | None = None) -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = undo_change_sync(change_id=change_id, door="app")
+        return ok_reply("undo", data, ref=data.get("change_id"))
+    except SettingsError as e:
+        return _settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "settings")
+
+
+undo_change = tool(undo_change_tool)
 
 
 # Only actions that exist now belong here (G5: seed a row only once its action works).
@@ -258,4 +1095,71 @@ ACTIONS = {
         "time_bearing": True,
         "description": PLAN_WEEK_DESCRIPTION,
     },
+    "sched.get_settings": {
+        "fn": get_settings,
+        "lockable": ("group", "day"),
+        "py_params": {"group": "group", "day": "day"},
+        "doors": ("app", "bot"),
+        "kind": "settings",
+        "time_bearing": False,
+        "description": GET_SETTINGS_DESCRIPTION,
+    },
+    "sched.change_setting": {
+        "fn": change_setting,
+        "lockable": ("key", "scope", "value", "day"),
+        "py_params": {"key": "key", "scope": "scope", "value": "value", "day": "day",
+                      "reason": "reason", "request_id": "request_id"},
+        "doors": ("app", "bot"),
+        "kind": "change",
+        "time_bearing": False,
+        "description": CHANGE_SETTING_DESCRIPTION,
+    },
+    "sched.undo_change": {
+        "fn": undo_change,
+        "lockable": ("change_id",),
+        "py_params": {"change_id": "change_id"},
+        "doors": ("app", "bot"),
+        "kind": "undo",
+        "time_bearing": False,
+        "description": UNDO_CHANGE_DESCRIPTION,
+    },
 }
+
+
+def main(argv=None):
+    import sys as _sys
+    argv = list(_sys.argv[1:] if argv is None else argv)
+    cmd = argv[0] if argv else "settings"
+    if cmd in ("-h", "--help"):
+        print("rivia_sched.py settings [day] | settings-log")
+        return 2
+    try:
+        if not selftest_ok():
+            print(json.dumps({"ok": False, "error": {"code": "selftest_failed", "msg": "planner selftest failed", "step": "planner"}}, indent=1))
+            return 1
+        if cmd == "settings":
+            day = argv[1] if len(argv) > 1 else None
+            data = get_settings_sync(group="schedule", day=day)
+            print(json.dumps({"ok": True, **data}, indent=1))
+            return 0
+        if cmd == "settings-log":
+            con = rp.db_open()
+            try:
+                ensure_store(con)
+                rows = list(con.execute(
+                    "select change_id, created, door, scope, day, key, old, new, status, reason from changes order by created, rowid"
+                ))
+                cols = ["change_id", "created", "door", "scope", "day", "key", "old", "new", "status", "reason"]
+                print(json.dumps({"ok": True, "changes": [dict(zip(cols, r)) for r in rows]}, indent=1))
+            finally:
+                con.close()
+            return 0
+        print("unknown command: %s (use settings or settings-log)" % cmd, file=_sys.stderr)
+        return 2
+    except SettingsError as e:
+        print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
