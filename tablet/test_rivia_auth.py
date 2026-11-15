@@ -4,7 +4,9 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 PW = "correct horse battery staple"
 _salt = secrets.token_bytes(16)
-os.environ.update(RIVIA_DB=os.path.join(tempfile.mkdtemp(), "t.db"),
+_DOT = tempfile.mkdtemp()
+os.environ.update(RIVIA_DB=os.path.join(_DOT, "t.db"),
+                  RIVIA_DOTDIR=_DOT,
                   RIVIA_JWT_KEY=secrets.token_hex(32),
                   RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(PW.encode(), salt=_salt, n=2**14, r=8, p=1).hex(),
                   RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="))
@@ -158,4 +160,49 @@ ok(call("POST", "/mcp", headers=h).status == 401, "revoke-all kills live tokens"
 for _ in range(4): call("POST", "/authorize", form={**q, "act": "allow", "pw": "x", "otp": "1"})
 ok(call("POST", "/authorize", form={**q, "act": "allow", "pw": PW, "otp": ra.totp_now(ra.TOTP_SECRET)}).status == 429,
    "5 failures -> lockout even with correct creds")
+
+# 10. door table and admin token (never printed)
+import stat, subprocess, sys
+app_info = ra.mint_door_token("app", 30)
+admin_info = ra.mint_door_token("admin", 7)
+ok(admin_info["path"] == ra.admin_token_path() and os.path.isfile(admin_info["path"]),
+   "mint_door_token admin writes the token file under RIVIA_DOTDIR")
+ok(stat.S_IMODE(os.stat(admin_info["path"]).st_mode) == 0o600, "admin token file mode is 600")
+ok(ra.tokens_equal(admin_info["token"], ra.load_admin_token()),
+   "stored admin token matches in constant time")
+ah = {"Authorization": "Bearer " + admin_info["token"]}
+ph = {"Authorization": "Bearer " + app_info["token"]}
+# echo_stub is mounted at /mcp and /; /app and /admin are not mounted here, but
+# the gate still enforces the door table on the path.
+ok(call("POST", "/admin/mcp", headers=ah).status in (200, 404),
+   "admin token is accepted for the admin path")
+ok(call("POST", "/app/mcp", headers=ah).status == 403
+   and call("POST", "/app/mcp", headers=ah).json()["error"] == "wrong_door",
+   "admin token on the app path is 403 wrong_door")
+ok(call("POST", "/mcp", headers=ah).status == 403
+   and call("POST", "/mcp", headers=ah).json()["error"] == "wrong_door",
+   "admin token on the bot path is 403 wrong_door")
+ok(call("POST", "/admin/mcp", headers=ph).status == 403
+   and call("POST", "/admin/mcp", headers=ph).json()["error"] == "wrong_door",
+   "app token on the admin path is 403 wrong_door")
+ok(call("POST", "/app/mcp", headers=ph).status in (200, 404),
+   "a new admin token leaves the app token able to open the app path")
+cli = subprocess.run([sys.executable, __file__.replace("test_rivia_auth.py", "rivia_auth.py"),
+                      "mint-token", "admin", "7"],
+                     capture_output=True, text=True, env=os.environ)
+ok(cli.returncode == 0 and "eyJ" not in cli.stdout and "eyJ" not in cli.stderr,
+   "mint-token admin CLI does not print the token")
+ok(call("POST", "/app/mcp", headers=ph).status in (200, 404),
+   "reminting the admin token still leaves the app token working")
+ra.clear_admin_token_file()
+# subprocess revoke-all
+rev = subprocess.run([sys.executable, __file__.replace("test_rivia_auth.py", "rivia_auth.py"),
+                      "revoke-all"],
+                     capture_output=True, text=True, env=os.environ)
+ok(rev.returncode == 0 and not os.path.exists(ra.admin_token_path()),
+   "revoke-all removes the stored admin token")
+ok("eyJ" not in rev.stdout and "eyJ" not in rev.stderr, "revoke-all does not print a token")
+ok(call("POST", "/admin/mcp", headers=ah).status == 401,
+   "a revoked admin token is 401 on the admin path")
+
 print("\nALL PASS")

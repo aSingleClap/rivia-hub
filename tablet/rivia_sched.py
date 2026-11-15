@@ -669,7 +669,7 @@ def _pin_spacing_problems(resolved):
             d = rp.meters_between(pins[a], pins[b])
             if d < min_m:
                 problems.append(
-                    "The %s and %s pins are %.0f m apart; they must be at least %d m "
+                    "The %s and %s pins are %.1f m apart; they must be at least %d m "
                     "apart (2× the %d m geofence radius)." % (a, b, d, min_m, radius)
                 )
     return problems

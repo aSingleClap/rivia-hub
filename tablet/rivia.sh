@@ -28,6 +28,7 @@
 #   rivia restart   stop + start (do this after editing any .py file)
 #   rivia setup     make new secrets in ~/.rivia/.env (only if you have none)
 #   rivia token     make the Rivia app's token (replaces the old one)
+#   rivia admin-token  make the admin-door token (7 days; saved under ~/.rivia, not printed)
 #   rivia install-cli  put `rivia` on PATH ($PREFIX/bin on Termux, else ~/.local/bin)
 #   rivia ask BOT "request"   ask a bot through its webhook and wait for its post_reply
 
@@ -301,7 +302,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -318,7 +319,8 @@ case "${1:-}" in
                  mv "$HOME/.rivia/.env.new" "$HOME/.rivia/.env"
                  echo "Saved ~/.rivia/.env. Add RIVIA_TOTP_SECRET from it to your authenticator app."
              else rm -f "$HOME/.rivia/.env.new"; die "setup failed; nothing saved"; fi ;;
-    token)   load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-app-token "${2:-365}" ;;
+    token)   load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-token app "${2:-365}" ;;
+    admin-token) load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-token admin "${2:-7}" ;;
     sched)   sched "${@:2}" ;;
     install-cli) install_cli ;;
     ask)     [ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'usage: rivia ask ard "What does tomorrow look like? Don'"'"'t write anything."'
@@ -340,5 +342,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

@@ -20,7 +20,7 @@ def free_port():
 HOOK_PORT = free_port()
 os.environ.update(
     RIVIA_DIR=os.path.join(TMP, "rivia"),
-    RIVIA_DB=os.path.join(TMP, "auth.db"), RIVIA_MAILBOX_DB=os.path.join(TMP, "mailbox.db"),
+    RIVIA_DB=os.path.join(TMP, "auth.db"), RIVIA_DOTDIR=TMP, RIVIA_MAILBOX_DB=os.path.join(TMP, "mailbox.db"),
     RIVIA_ISSUER="https://mcp.rivia.observer", RIVIA_JWT_KEY=secrets.token_hex(32),
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
     RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
@@ -30,6 +30,7 @@ os.environ.update(
 sys.path.insert(0, HERE)
 import uvicorn
 import rivia_auth as ra
+import rivia_admin as admin
 import rivia_server as rs
 from fastmcp import Client
 
@@ -110,6 +111,8 @@ async def main():
     ok("first person" in at["ask_bot"].description and "never naming the bot" in at["ask_bot"].description,
        "ask_bot tells Gemini to speak as Rivia, never naming the bot")
     ok(set(bt) == {"get_tablet_battery", "post_reply"}, "bot door lists post_reply, battery")
+    ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
+       "admin tools stay off the app and bot doors")
     ok(await refused(B, APP), "app token refused on the bot door")
     ok(await refused(A, BOT), "bot token refused on the app door")
     ok(await refused(A, old_app_token), "a re-minted app token kills the old one")
