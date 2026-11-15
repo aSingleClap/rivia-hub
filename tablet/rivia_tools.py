@@ -38,6 +38,10 @@ SEED = (
      "preset": {}, "description": sched.UNDO_CHANGE_DESCRIPTION, "model": 1, "enabled": 1},
     {"name": "app_places", "door": "app", "action": "sched.places",
      "preset": {}, "description": sched.PLACES_DESCRIPTION, "model": 0, "enabled": 1},
+    {"name": "app_arrival", "door": "app", "action": "sched.arrival",
+     "preset": {}, "description": sched.ARRIVAL_DESCRIPTION, "model": 0, "enabled": 1},
+    {"name": "app_log_ride", "door": "app", "action": "sched.log_ride",
+     "preset": {}, "description": sched.LOG_RIDE_DESCRIPTION, "model": 0, "enabled": 1},
 )
 
 _installed: set[str] = set()

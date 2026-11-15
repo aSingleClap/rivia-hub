@@ -87,7 +87,9 @@ ok(set(rows) == {
     ("change_schedule_setting", "app", "sched.change_setting", 1, 1),
     ("undo_schedule_change", "app", "sched.undo_change", 1, 1),
     ("app_places", "app", "sched.places", 0, 1),
-}, "seeded tools: ride_time, plan_day, settings tools, and app_places on the app door only")
+    ("app_arrival", "app", "sched.arrival", 0, 1),
+    ("app_log_ride", "app", "sched.log_ride", 0, 1),
+}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride on the app door only")
 # second open does not duplicate
 tools.open_db().close()
 con = tools.open_db()
@@ -95,16 +97,20 @@ try:
     n = con.execute("select count(*) from tools").fetchone()[0]
 finally:
     con.close()
-ok(n == 6, "seed is idempotent")
+ok(n == 8, "seed is idempotent")
 ok(sched.ACTIONS["sched.get_settings"]["doors"] == ("app",), "get_settings is app door only")
 ok(sched.ACTIONS["sched.change_setting"]["doors"] == ("app",), "change_setting is app door only")
 ok(sched.ACTIONS["sched.undo_change"]["doors"] == ("app",), "undo_change is app door only")
 ok(sched.ACTIONS["sched.places"]["doors"] == ("app",), "places is app door only")
+ok(sched.ACTIONS["sched.arrival"]["doors"] == ("app",), "arrival is app door only")
+ok(sched.ACTIONS["sched.log_ride"]["doors"] == ("app",), "log_ride is app door only")
 ok("bot" not in sched.ACTIONS["sched.get_settings"]["doors"]
    and "bot" not in sched.ACTIONS["sched.change_setting"]["doors"]
    and "bot" not in sched.ACTIONS["sched.undo_change"]["doors"]
-   and "bot" not in sched.ACTIONS["sched.places"]["doors"],
-   "settings and places actions are not on the bot door")
+   and "bot" not in sched.ACTIONS["sched.places"]["doors"]
+   and "bot" not in sched.ACTIONS["sched.arrival"]["doors"]
+   and "bot" not in sched.ACTIONS["sched.log_ride"]["doors"],
+   "settings, places, arrival, and log_ride actions are not on the bot door")
 
 
 # ── plan_day / plan_week against a fake Google on loopback ──
@@ -293,10 +299,12 @@ async def main():
     ok("get_schedule_settings" in at and "change_schedule_setting" in at and "undo_schedule_change" in at,
        "app door lists the schedule settings tools")
     ok("app_places" in at, "app door lists app_places")
+    ok("app_arrival" in at and "app_log_ride" in at, "app door lists app_arrival and app_log_ride")
     ok("plan_week" not in at, "plan_week has no seeded row")
     ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt
        and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
-       and "undo_schedule_change" not in bt and "app_places" not in bt,
+       and "undo_schedule_change" not in bt and "app_places" not in bt
+       and "app_arrival" not in bt and "app_log_ride" not in bt,
        "bot door has no scheduler tools")
     schema = getattr(at["ride_time"], "input_schema", None) or at["ride_time"].inputSchema
     props = (schema or {}).get("properties") or {}

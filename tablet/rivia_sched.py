@@ -316,6 +316,16 @@ PLACES_DESCRIPTION = (
     "Jordan's places for geofences: each place's id, spoken name, pin (lat, lng), "
     "and geofence radius in meters."
 )
+ARRIVAL_DESCRIPTION = (
+    "Jordan just arrived at a place. Logs a ride if one is given (safe to repeat "
+    "on the same ride_id), reads the calendar, and returns the leave-by message, "
+    "alerts, and fallback_text. title 'test' returns a plumbing alert two minutes out."
+)
+LOG_RIDE_DESCRIPTION = (
+    "Log one bike ride between two of Jordan's places. Safe to repeat on the same "
+    "ride_id (returns duplicate and does not store a second copy)."
+)
+LAST_ARRIVAL_KEY = "last_arrival"
 
 
 class SettingsError(Exception):
@@ -1125,8 +1135,10 @@ def change_setting_tool(key: str, scope: str, value: Union[str, int, float],
     try:
         data = change_setting_sync(key, value, scope, day=day, reason=reason,
                                    request_id=request_id, door="app")
+        data, alerts, message = maybe_refresh_alerts(data)
         kind = "change" if data.get("status") == "applied" else "pending"
-        return ok_reply(kind, data, ref=data.get("change_id"))
+        return ok_reply(kind, data, ref=data.get("change_id"),
+                        message=message, alerts=alerts)
     except SettingsError as e:
         return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
@@ -1143,7 +1155,9 @@ def undo_change_tool(change_id: str | None = None) -> dict:
                     "planner")
     try:
         data = undo_change_sync(change_id=change_id, door="app")
-        return ok_reply("undo", data, ref=data.get("change_id"))
+        data, alerts, message = maybe_refresh_alerts(data)
+        return ok_reply("undo", data, ref=data.get("change_id"),
+                        message=message, alerts=alerts)
     except SettingsError as e:
         return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
@@ -1221,6 +1235,205 @@ def places_tool() -> dict:
 
 
 places = tool(places_tool)
+
+
+def _arrival_day(t_s, now=None):
+    dt = datetime.fromtimestamp(int(t_s), gcal.TZ)
+    return dt.date()
+
+
+def _save_last_arrival(con, rec):
+    rp.set_meta(con, LAST_ARRIVAL_KEY, json.dumps(rec, separators=(",", ":")))
+
+
+def _load_last_arrival(con=None):
+    close = False
+    if con is None:
+        con = rp.db_open()
+        close = True
+    try:
+        raw = rp.get_meta(con, LAST_ARRIVAL_KEY)
+        if not raw:
+            return None
+        rec = json.loads(raw) if isinstance(raw, str) else raw
+        return rec if isinstance(rec, dict) else None
+    except (TypeError, ValueError):
+        return None
+    finally:
+        if close:
+            con.close()
+
+
+def _maybe_backup_ride(ride_out):
+    """Trigger the PR 2 Drive backup after a newly stored ride. Never raises."""
+    if not ride_out or not ride_out.get("stored") or not ride_out.get("backup_due"):
+        return None
+    try:
+        return gcal.run_drive_backup()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": {"code": "internal", "msg": type(e).__name__, "step": "drive"}}
+
+
+def log_ride_sync(ride):
+    """Log one ride (dict of planner log-ride fields) and back it up if it was new."""
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    if not isinstance(ride, dict):
+        return fail("bad_ride", "ride must be an object with ride_id, from, to, departed and arrived.", "input")
+    try:
+        out = rp.cmd_log_ride(ride)
+        backup = _maybe_backup_ride(out)
+        if backup is not None:
+            out = dict(out, backup=backup)
+        return ok_reply("ride", out, ref=ride.get("ride_id"))
+    except rp.RiviaError as e:
+        step = "input" if e.code in ("bad_ride_id", "bad_place", "bad_time") else "planner"
+        return fail(e.code, str(e), step, data=dict(e.extra) if e.extra else {}, ref=ride.get("ride_id"))
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "planner", ref=ride.get("ride_id"))
+
+
+def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=None, *, replay=False):
+    """Log an optional ride, read the calendar one day each side, run the planner arrival.
+
+    Stores the last arrival (place, title, time) so a day change that applies
+    today can rerun it. replay=True skips logging and does not require a new
+    write to last_arrival when the stored record is reused.
+    """
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    ref = None
+    ride_out = None
+    try:
+        if ride and not replay:
+            logged = log_ride_sync(ride)
+            if not logged.get("ok"):
+                return logged
+            ride_out = logged.get("data")
+        now_s = int(now.timestamp()) if (now is not None and hasattr(now, "timestamp")) else rp.now_s()
+        if time is None or time == "":
+            t_s = now_s
+        else:
+            t_s = rp.to_epoch(time, "time")
+        title = title or ""
+        is_test = str(title).strip().lower() == "test"
+        events = []
+        if not is_test:
+            day = _arrival_day(t_s, now=now)
+            events = gcal.events_for_plan(day, day, before=1, after=1, now=now)
+        inp = {"time": t_s, "now": now_s, "title": title, "events": events}
+        if place:
+            inp["place"] = place
+        if coords not in (None, ""):
+            inp["coords"] = coords
+        ensure_store(now=now)
+        day = _arrival_day(t_s, now=now)
+        with planner_swap(day=day, now=now):
+            out = rp.cmd_arrival(inp)
+        if not replay:
+            con = rp.db_open()
+            try:
+                rec = {
+                    "place": place or out.get("place"),
+                    "title": title,
+                    "time": rp.iso(t_s),
+                }
+                if coords not in (None, ""):
+                    rec["coords"] = coords
+                _save_last_arrival(con, rec)
+            finally:
+                con.close()
+        data = {
+            "place": out.get("place"),
+            "arrived": out.get("arrived"),
+        }
+        if ride_out is not None:
+            data["ride"] = ride_out
+        return ok_reply(
+            "arrival", data, ref=ref,
+            message=out.get("message"),
+            alerts=out.get("alerts"),
+            fallback_text=out.get("fallback_text"),
+        )
+    except gcal.GcalError as e:
+        return _gcal_fail(e, ref=ref)
+    except rp.RiviaError as e:
+        if e.code == "need_maps":
+            return fail("need_estimate", str(e), "planner",
+                        data={"pairs": e.extra.get("pairs") or []}, ref=ref)
+        step = "input" if e.code in ("bad_place", "bad_time", "bad_coords") else "planner"
+        return fail(e.code, str(e), step, data=dict(e.extra) if e.extra else {}, ref=ref)
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "planner", ref=ref)
+
+
+def replay_last_arrival(now=None):
+    """Rerun the stored last arrival with current settings. Raises on failure."""
+    rec = _load_last_arrival()
+    if not rec:
+        raise SettingsError("no_arrival", "There is no last arrival to rerun.", step="settings")
+    out = arrival_sync(
+        place=rec.get("place"), title=rec.get("title"), coords=rec.get("coords"),
+        time=rec.get("time"), ride=None, now=now, replay=True,
+    )
+    if not out.get("ok"):
+        err = out.get("error") or {}
+        raise SettingsError(
+            err.get("code") or "alerts_refresh",
+            err.get("msg") or "The last arrival could not be rerun.",
+            step=err.get("step") or "planner",
+        )
+    return out
+
+
+def maybe_refresh_alerts(data, now=None):
+    """If a day change or undo applies today, rerun the last arrival.
+
+    The change itself already stands. On failure: alerts is null and
+    data.alerts_refresh is 'failed'. Returns (data, alerts, message).
+    """
+    data = dict(data or {})
+    today = _today_date(now).isoformat()
+    applies = data.get("scope") == "day" and data.get("day") == today
+    if not applies or data.get("duplicate") or data.get("status") not in (None, "applied"):
+        return data, None, None
+    if _load_last_arrival() is None:
+        return data, None, None
+    try:
+        arr = replay_last_arrival(now=now)
+        data["alerts_refresh"] = "ok"
+        return data, arr.get("alerts"), arr.get("message")
+    except Exception:  # noqa: BLE001
+        data["alerts_refresh"] = "failed"
+        return data, None, None
+
+
+def arrival_tool(place: str | None = None, title: str | None = None,
+                 coords: Union[str, dict, None] = None,
+                 time: Union[str, int, float, None] = None,
+                 ride: dict | None = None) -> dict:
+    return arrival_sync(place=place, title=title, coords=coords, time=time, ride=ride)
+
+
+def log_ride_tool(ride_id: str, from_place: str | None = None, to_place: str | None = None,
+                  departed: Union[str, int, float, None] = None,
+                  arrived: Union[str, int, float, None] = None,
+                  distance_km: Union[int, float, None] = None,
+                  avg_kmh: Union[int, float, None] = None,
+                  polyline: str | None = None) -> dict:
+    ride = {"ride_id": ride_id, "from": from_place, "to": to_place,
+            "departed": departed, "arrived": arrived,
+            "distance_km": distance_km, "avg_kmh": avg_kmh, "polyline": polyline}
+    ride = {k: v for k, v in ride.items() if v is not None}
+    return log_ride_sync(ride)
+
+
+arrival = tool(arrival_tool)
+log_ride = tool(log_ride_tool)
 
 
 def cmd_pin(place, lat, lng):
@@ -1347,6 +1560,28 @@ ACTIONS = {
         "kind": "places",
         "time_bearing": False,
         "description": PLACES_DESCRIPTION,
+    },
+    "sched.arrival": {
+        "fn": arrival,
+        "lockable": ("place", "title"),
+        "py_params": {"place": "place", "title": "title", "coords": "coords",
+                      "time": "time", "ride": "ride"},
+        "doors": ("app",),
+        "kind": "arrival",
+        "time_bearing": True,
+        "description": ARRIVAL_DESCRIPTION,
+    },
+    "sched.log_ride": {
+        "fn": log_ride,
+        "lockable": (),
+        "py_params": {"ride_id": "ride_id", "from_place": "from", "to_place": "to",
+                      "departed": "departed", "arrived": "arrived",
+                      "distance_km": "distance_km", "avg_kmh": "avg_kmh",
+                      "polyline": "polyline"},
+        "doors": ("app",),
+        "kind": "ride",
+        "time_bearing": False,
+        "description": LOG_RIDE_DESCRIPTION,
     },
 }
 
