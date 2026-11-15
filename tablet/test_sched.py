@@ -95,6 +95,13 @@ try:
 finally:
     con.close()
 ok(n == 5, "seed is idempotent")
+ok(sched.ACTIONS["sched.get_settings"]["doors"] == ("app",), "get_settings is app door only")
+ok(sched.ACTIONS["sched.change_setting"]["doors"] == ("app",), "change_setting is app door only")
+ok(sched.ACTIONS["sched.undo_change"]["doors"] == ("app",), "undo_change is app door only")
+ok("bot" not in sched.ACTIONS["sched.get_settings"]["doors"]
+   and "bot" not in sched.ACTIONS["sched.change_setting"]["doors"]
+   and "bot" not in sched.ACTIONS["sched.undo_change"]["doors"],
+   "settings actions are not on the bot door")
 
 
 # ── plan_day / plan_week against a fake Google on loopback ──

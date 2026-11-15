@@ -3,6 +3,7 @@
 # door tools with Tool.from_tool.
 import asyncio
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Any, Union
 
@@ -1099,7 +1100,7 @@ ACTIONS = {
         "fn": get_settings,
         "lockable": ("group", "day"),
         "py_params": {"group": "group", "day": "day"},
-        "doors": ("app", "bot"),
+        "doors": ("app",),
         "kind": "settings",
         "time_bearing": False,
         "description": GET_SETTINGS_DESCRIPTION,
@@ -1109,7 +1110,7 @@ ACTIONS = {
         "lockable": ("key", "scope", "value", "day"),
         "py_params": {"key": "key", "scope": "scope", "value": "value", "day": "day",
                       "reason": "reason", "request_id": "request_id"},
-        "doors": ("app", "bot"),
+        "doors": ("app",),
         "kind": "change",
         "time_bearing": False,
         "description": CHANGE_SETTING_DESCRIPTION,
@@ -1118,7 +1119,7 @@ ACTIONS = {
         "fn": undo_change,
         "lockable": ("change_id",),
         "py_params": {"change_id": "change_id"},
-        "doors": ("app", "bot"),
+        "doors": ("app",),
         "kind": "undo",
         "time_bearing": False,
         "description": UNDO_CHANGE_DESCRIPTION,
@@ -1126,14 +1127,66 @@ ACTIONS = {
 }
 
 
+
+def cmd_rides():
+    """Ride count in scheduler.db. Termux only; no door or tool."""
+    con = rp.db_open()
+    try:
+        return {"ok": True, "rides": rp.ride_count(con), "fresh": rp.is_fresh(con)}
+    finally:
+        con.close()
+
+
+def cmd_restore_file(path):
+    """Restore rides from a Drive copy (scheduler.db or scheduler.json).
+    Merges into the live database and never drops a ride that is already there."""
+    path = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not path or not os.path.isfile(path):
+        raise rp.RiviaError("bad_copy", "No file at %s." % (path or "(none)",))
+    out = rp.cmd_restore({"path": path})
+    out["ok"] = True
+    out["path"] = path
+    return out
+
+
+def cmd_start_fresh():
+    """Clear the planner's fresh-database guard (init-db). Termux only; no door or tool.
+
+    On a new, empty database this unlocks log_ride and backup. On a database
+    that is already in use it is a no-op and does not drop rides.
+    """
+    out = rp.cmd_init_db({})
+    rides = cmd_rides()
+    out["ok"] = True
+    out["rides"] = rides["rides"]
+    out["fresh"] = rides["fresh"]
+    return out
+
+
 def main(argv=None):
     import sys as _sys
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh")
         return 2
     try:
+        # restore / rides / start-fresh are Termux recovery commands; they must
+        # work even if selftest failed.
+        if cmd == "rides":
+            print(json.dumps(cmd_rides(), indent=1))
+            return 0
+        if cmd == "restore":
+            if len(argv) < 2:
+                print("usage: rivia sched restore <file>", file=_sys.stderr)
+                return 2
+            out = cmd_restore_file(argv[1])
+            print(json.dumps(out, indent=1))
+            return 0
+        if cmd == "start-fresh":
+            out = cmd_start_fresh()
+            print(json.dumps(out, indent=1))
+            return 0
         if not selftest_ok():
             print(json.dumps({"ok": False, "error": {"code": "selftest_failed", "msg": "planner selftest failed", "step": "planner"}}, indent=1))
             return 1
@@ -1154,10 +1207,13 @@ def main(argv=None):
             finally:
                 con.close()
             return 0
-        print("unknown command: %s (use settings or settings-log)" % cmd, file=_sys.stderr)
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, or start-fresh)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))
+        return 1
+    except rp.RiviaError as e:
+        print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": "restore"}}, indent=1))
         return 1
 
 
