@@ -1,5 +1,5 @@
 # rivia_tools.py: the scheduler tool table and call log in scheduler.db.
-# Rows are built with Tool.from_tool and registered on a door. Seeded on the app door as actions ship (G5). plan_week has no seeded row; there is no tool editing yet.
+# Rows are built with Tool.from_tool and registered on a door. Seeded on the app door as actions ship (G5). plan_week has no seeded row; there is no tool editing yet. Settings rows ship with 7a-2.
 import json
 import time
 
@@ -30,6 +30,12 @@ SEED = (
      "preset": {}, "description": RIDE_TIME_SEED_DESCRIPTION, "model": 1, "enabled": 1},
     {"name": "plan_day", "door": "app", "action": "sched.plan_day",
      "preset": {}, "description": sched.PLAN_DAY_DESCRIPTION, "model": 1, "enabled": 1},
+    {"name": "get_schedule_settings", "door": "app", "action": "sched.get_settings",
+     "preset": {"group": "schedule"}, "description": sched.GET_SETTINGS_DESCRIPTION, "model": 1, "enabled": 1},
+    {"name": "change_schedule_setting", "door": "app", "action": "sched.change_setting",
+     "preset": {}, "description": sched.CHANGE_SETTING_DESCRIPTION, "model": 1, "enabled": 1},
+    {"name": "undo_schedule_change", "door": "app", "action": "sched.undo_change",
+     "preset": {}, "description": sched.UNDO_CHANGE_DESCRIPTION, "model": 1, "enabled": 1},
 )
 
 _installed: set[str] = set()
@@ -63,6 +69,7 @@ def open_db():
     con = rp.db_open()
     ensure_schema(con)
     seed_tools(con)
+    sched.ensure_store(con)
     return con
 
 

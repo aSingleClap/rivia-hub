@@ -92,7 +92,7 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo('America/New_York')
 RIVIA_DIR = os.path.expanduser(os.environ.get('RIVIA_DIR', '~/rivia'))
 PLACES_FILE = os.path.join(RIVIA_DIR, 'places.json')
-VERSION = 'planner 4.1 (port of Code.gs 3.2, rides in SQLite)'
+VERSION = 'planner 4.2 (port of Code.gs 3.2, rides in SQLite)'
 
 # Schedular v2 config. Same numbers as Code.gs.
 CFG = {
@@ -738,7 +738,7 @@ def farm_plan(t_s, now, shift, leg, gym_id):
     leave_work = a['hmcArrive'] - leg('farm', 'hmc') * 60
     facts = {'place': pfact('farm'), 'late_minutes': cut['lateM'], 'workout_floor_minutes': CFG['workoutFloorM'],
              'leave_for_work_by': tfact(leave_work), 'shift_start': tfact(shift['start'])}
-    fb = ('Running %s behind, so a 60-minute workout no longer fits. ' % min_words(cut['lateM']) +
+    fb = ('Running %s behind, so a %d-minute workout no longer fits. ' % (min_words(cut['lateM']), CFG['workoutFloorM']) +
           'Shortening the farm or taking a rest day is your call; leave for work by %s at the latest.' % clock(leave_work))
     return result(message('farm_late_over_floor', facts, ['late_minutes', 'leave_for_work_by'],
                           ['shorten the farm', 'take a rest day']),
@@ -772,7 +772,7 @@ def gym_plan(t_s, now, shift, leg, gym_id):
                                                       'leave_for_work_at']), alerts, fb)
     left_m = max(0, (a['leaveGym'] - CFG['preworkFloorM'] * 60 - t_s) // 60)
     facts = dict(base, workout_minutes_left=left_m, workout_floor_minutes=CFG['workoutFloorM'])
-    fb = ('Only %s left for the workout, under the 60-minute floor, so short cardio, ' % min_words(left_m) +
+    fb = ('Only %s left for the workout, under the %d-minute floor, so short cardio, ' % (min_words(left_m), CFG['workoutFloorM']) +
           'a longer pre-work or a rest day is your call. ' + to_work)
     return result(message('gym_late_over_floor', facts, ['workout_minutes_left', 'leave_for_work_at'],
                           ['short cardio', 'a longer pre-work', 'a rest day']), alerts, fb)
