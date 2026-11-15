@@ -475,12 +475,31 @@ ok(login_out["r"]["ok"] and json.load(open(login_out["r"]["saved"]))["refresh_to
 mode = os.stat(login_out["r"]["saved"]).st_mode & 0o777
 ok(mode == 0o600, "paste-fallback token is also mode 600")
 
-# --write is step 8, not this ticket
+# google-login and google-login --write both request the three scopes in one go
+ok(g.login_scope() == g.SCOPE_ALL, "login_scope is calendar read + app.created + drive.file")
+for needed in (g.SCOPE_READ, g.SCOPE_CALENDAR_APP, g.SCOPE_DRIVE_FILE):
+    ok(needed in g.SCOPE_ALL.split(), "login_scope includes %s" % needed.split("/")[-1])
+url_all = g.authorize_url("http://127.0.0.1:9/", "st", "ch", scope=g.login_scope())
+qs_all = parse_qs(urlparse(url_all).query)
+granted = set((qs_all.get("scope") or [""])[0].split())
+ok(granted == set(g.SCOPES_WRITE), "auth URL for google-login asks for all three scopes")
+# --write is no longer refused; it calls google_login with the same scopes
+# (do not actually start the loopback listener here).
+seen = {}
+real_login = g.google_login
+
+def fake_login(**kw):
+    seen.update(kw)
+    return {"ok": True, "scope": kw.get("scope") or g.login_scope(), "saved": "x"}
+
+g.google_login = fake_login
 try:
-    g.cmd_google_login(["--write"])
-    ok(False, "--write should be refused")
-except g.GcalError as e:
-    ok(e.code == "bad_scope" and e.step == "input", "google-login --write is reserved for step 8")
+    out_w = g.cmd_google_login(["--write"])
+    out_p = g.cmd_google_login([])
+finally:
+    g.google_login = real_login
+ok(out_w["ok"] and out_w["scope"] == g.SCOPE_ALL, "google-login --write requests all three scopes")
+ok(out_p["ok"] and out_p["scope"] == g.SCOPE_ALL, "google-login without flags also requests all three scopes")
 
 # CLI: events tomorrow via main(), mocked now by patching datetime? cmd path uses resolve_day(now=None).
 # Instead call main after seeding events and a valid token with a real "tomorrow"
