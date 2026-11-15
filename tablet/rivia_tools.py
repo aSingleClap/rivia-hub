@@ -42,6 +42,8 @@ SEED = (
      "preset": {}, "description": sched.ARRIVAL_DESCRIPTION, "model": 0, "enabled": 1},
     {"name": "app_log_ride", "door": "app", "action": "sched.log_ride",
      "preset": {}, "description": sched.LOG_RIDE_DESCRIPTION, "model": 0, "enabled": 1},
+    {"name": "write_day", "door": "app", "action": "sched.write_day",
+     "preset": {}, "description": sched.WRITE_DAY_DESCRIPTION, "model": 1, "enabled": 1},
 )
 
 _installed: set[str] = set()
@@ -53,7 +55,7 @@ def append_fixed_lines(description, action):
     if info.get("time_bearing"):
         parts.append("Say times exactly as their spoken value, never work one out, "
                      "say every must_say fact, offer decisions_for_jordan and never pick one.")
-    if action == "sched.change_setting":
+    if action in ("sched.change_setting", "sched.write_day"):
         line = sched.PENDING_LINE
         blob = " ".join(parts)
         if line.lower() not in blob.lower():

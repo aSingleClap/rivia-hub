@@ -44,6 +44,9 @@ SCOPE_ALL = " ".join(SCOPES_WRITE)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
+RIVIA_CALENDAR_NAME = "Rivia"
+META_RIVIA_ID = "gcal_rivia_id"
 DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 DRIVE_BACKUP_NAME = "rivia-scheduler.db"
 DRIVE_BACKUP_MIME = "application/octet-stream"
@@ -812,6 +815,12 @@ def mark_signin_check_ran(day):
 
 
 def signin_check_at_hm():
+    """Morning tick time: honor auto_write_time, else RIVIA_SIGNIN_CHECK_TIME, else 05:30."""
+    try:
+        import rivia_sched as sched
+        return sched.auto_write_hm()
+    except Exception:
+        pass
     raw = (os.environ.get("RIVIA_SIGNIN_CHECK_TIME") or "05:30").strip()
     try:
         h, m = raw.split(":")
@@ -916,12 +925,25 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
         try:
             now = get_now()
             if signin_check_due(now):
-                run_signin_check(now=now, mark_ran=True)
                 try:
-                    run_drive_backup()
+                    import rivia_sched as sched
+                    sched.run_morning_tick(now=now)
                 except Exception as e:  # noqa: BLE001
-                    print("rivia: daily Drive backup failed (%s); continuing." % type(e).__name__,
+                    print("rivia: morning tick failed (%s); falling back to sign-in check." % type(e).__name__,
                           file=sys.stderr)
+                    run_signin_check(now=now, mark_ran=True)
+                    try:
+                        run_drive_backup()
+                    except Exception as e2:  # noqa: BLE001
+                        print("rivia: daily Drive backup failed (%s); continuing." % type(e2).__name__,
+                              file=sys.stderr)
+            try:
+                import rivia_sched as sched
+                if sched.evening_refresh_due(now):
+                    sched.run_evening_refresh(now=now)
+            except Exception as e:  # noqa: BLE001
+                print("rivia: evening refresh failed (%s); continuing." % type(e).__name__,
+                      file=sys.stderr)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -991,9 +1013,9 @@ def list_events(day: date):
 def events_for_plan(first_day: date, last_day: date, *, before=2, after=2, now=None):
     """Primary events from `before` days before first_day to `after` days after last_day.
 
-    This is the calendar read plan_day / plan_week use, and the same read the
-    5:30 AM ET auto-write job (step 7b, not built yet) should use. Auth and
-    refresh failures are recorded and (once per day) notified via Termux.
+    This is the calendar read plan_day / plan_week and the morning auto-write
+    job use. Auth and refresh failures are recorded and (once per day)
+    notified via Termux.
     """
     tmin, tmax = plan_window(first_day, last_day, before=before, after=after)
     try:
@@ -1237,6 +1259,199 @@ def main(argv=None):
                           "error": {"code": "internal", "msg": repr(e), "step": "calendar"},
                           "status": clock_status()}, indent=1))
         return 1
+
+
+def calendar_base():
+    return (os.environ.get("RIVIA_GOOGLE_CALENDAR_BASE") or CALENDAR_BASE).rstrip("/")
+
+
+def _calendar_path(*parts):
+    enc = [urllib.parse.quote(str(p), safe="") for p in parts]
+    return calendar_base() + "/calendars/" + "/".join(enc)
+
+
+def assert_not_primary(cal_id, action="write"):
+    if not cal_id or str(cal_id).strip().lower() == "primary":
+        raise GcalError(
+            "primary_forbidden",
+            "Rivia never %ss the primary calendar." % action,
+        )
+
+
+def _auth_headers(token, json_body=False):
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _json_call(method, url, payload=None, token=None):
+    """JSON Calendar API call. Mutating calls must not target primary (enforced by callers)."""
+    if token is None:
+        token, _ = access_token()
+    data = None
+    headers = _auth_headers(token, json_body=payload is not None)
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    # Record every mutating URL so tests can fail a write aimed at primary.
+    if method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
+        if "/calendars/primary" in url or url.rstrip("/").endswith("/calendars/primary"):
+            raise GcalError("primary_forbidden", "Rivia never writes to the primary calendar.")
+    status, _, body = http_request(method, url, headers=headers, data=data)
+    if status in (401, 403):
+        raise GcalError("needs_relogin", FIX_RELOGIN, step="auth")
+    if status not in (200, 201, 204):
+        snippet = (body or b"")[:200]
+        try:
+            snippet = snippet.decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            snippet = repr(snippet)
+        raise GcalError("calendar_http", "Google Calendar %s failed: HTTP %s %s" % (method, status, snippet))
+    if status == 204 or not body:
+        return {}
+    try:
+        return json.loads(body.decode())
+    except ValueError:
+        raise GcalError("calendar_http", "Google Calendar returned a non-JSON body.")
+
+
+def event_body_from_plan(ev, day, batch_id, kind=None):
+    """Turn a planner calendar_event into a Google event, tagged for later replace."""
+    start = ev.get("start")
+    end = ev.get("end")
+    if isinstance(start, dict):
+        start = start.get("dateTime") or start.get("iso") or start.get("date")
+    if isinstance(end, dict):
+        end = end.get("dateTime") or end.get("iso") or end.get("date")
+    kind = kind or ev.get("kind")
+    if not kind:
+        desc = ev.get("description") or ""
+        # planner tags "kind=%s" at the end of description
+        if "kind=" in desc:
+            kind = desc.rsplit("kind=", 1)[-1].strip(" ]")
+    body = {
+        "summary": ev.get("summary") or ev.get("title") or "Rivia",
+        "description": ev.get("description") or ev.get("desc") or "",
+        "location": ev.get("location") or "",
+        "start": {"dateTime": start, "timeZone": "America/New_York"},
+        "end": {"dateTime": end, "timeZone": "America/New_York"},
+        "extendedProperties": {
+            "private": {
+                "rivia_day": day,
+                "rivia_kind": kind or "",
+                "rivia_batch": batch_id,
+            }
+        },
+    }
+    return body
+
+
+def ensure_rivia_calendar():
+    """Create the app-owned 'Rivia' calendar on first approved write; store gcal_rivia_id."""
+    require_scopes(SCOPE_CALENDAR_APP)
+    existing = _meta_get(META_RIVIA_ID)
+    if existing:
+        assert_not_primary(existing)
+        return existing
+    created = _json_call("POST", calendar_base() + "/calendars", {"summary": RIVIA_CALENDAR_NAME})
+    cal_id = created.get("id")
+    if not cal_id:
+        raise GcalError("calendar_http", "Google did not return a calendar id for the new Rivia calendar.")
+    assert_not_primary(cal_id)
+    try:
+        _meta_set(META_RIVIA_ID, cal_id)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: could not store gcal_rivia_id (%s); continuing with the new id." % type(e).__name__,
+              file=sys.stderr)
+    return cal_id
+
+
+def list_rivia_events(cal_id, day):
+    """Events this app wrote for a day, found by the rivia_day private tag."""
+    assert_not_primary(cal_id, action="read-rivia")
+    require_scopes(SCOPE_CALENDAR_APP)
+    token, _ = access_token()
+    items = []
+    page = None
+    while True:
+        q = {"privateExtendedProperty": "rivia_day=%s" % day, "singleEvents": "true"}
+        if page:
+            q["pageToken"] = page
+        url = _calendar_path(cal_id, "events") + "?" + urllib.parse.urlencode(q)
+        data = _json_call("GET", url, token=token)
+        items.extend(data.get("items") or [])
+        page = data.get("nextPageToken")
+        if not page:
+            break
+    return items
+
+
+def create_rivia_event(cal_id, body):
+    assert_not_primary(cal_id)
+    return _json_call("POST", _calendar_path(cal_id, "events"), body)
+
+
+def delete_rivia_event(cal_id, event_id):
+    assert_not_primary(cal_id)
+    return _json_call("DELETE", _calendar_path(cal_id, "events", event_id))
+
+
+def write_rivia_day(day, status, calendar_events, *, batch_id=None):
+    """Apply an approved write_day to the app-owned Rivia calendar.
+
+    planned: create the new tagged batch, then delete that day's older tagged
+    events. If creating fails partway, the new batch is removed and the old
+    plan is left alone. no_shift deletes that day's tagged events. not_written
+    and under_way write nothing. Never touches primary.
+    """
+    require_scopes(SCOPE_CALENDAR_APP)
+    day_s = day.isoformat() if hasattr(day, "isoformat") else str(day)
+    if status in ("not_written", "under_way"):
+        return {"written": False, "status": status, "created": 0, "deleted": 0, "calendar_id": None}
+    cal_id = ensure_rivia_calendar()
+    assert_not_primary(cal_id)
+    batch_id = batch_id or ("batch_" + secrets.token_hex(8))
+    old_items = list_rivia_events(cal_id, day_s)
+    created_ids = []
+    if status == "planned":
+        try:
+            for ev in calendar_events or []:
+                body = event_body_from_plan(ev, day_s, batch_id)
+                created = create_rivia_event(cal_id, body)
+                eid = created.get("id")
+                if not eid:
+                    raise GcalError("calendar_http", "Google did not return an event id.")
+                created_ids.append(eid)
+        except Exception:
+            for eid in created_ids:
+                try:
+                    delete_rivia_event(cal_id, eid)
+                except Exception:  # noqa: BLE001
+                    print("rivia: could not roll back a new Rivia event; continuing.", file=sys.stderr)
+            raise
+        # New batch is complete; now drop the older tagged events.
+        deleted = 0
+        for item in old_items:
+            eid = item.get("id")
+            if not eid or eid in created_ids:
+                continue
+            delete_rivia_event(cal_id, eid)
+            deleted += 1
+        return {"written": True, "status": status, "created": len(created_ids),
+                "deleted": deleted, "calendar_id": cal_id, "batch_id": batch_id}
+    if status == "no_shift":
+        deleted = 0
+        for item in old_items:
+            eid = item.get("id")
+            if not eid:
+                continue
+            delete_rivia_event(cal_id, eid)
+            deleted += 1
+        return {"written": deleted > 0, "status": status, "created": 0,
+                "deleted": deleted, "calendar_id": cal_id, "batch_id": batch_id}
+    raise GcalError("bad_status", "Cannot write a day with status %s." % status)
+
+
 
 
 if __name__ == "__main__":

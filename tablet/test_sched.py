@@ -90,7 +90,8 @@ ok(set(rows) == {
     ("app_places", "app", "sched.places", 0, 1),
     ("app_arrival", "app", "sched.arrival", 0, 1),
     ("app_log_ride", "app", "sched.log_ride", 0, 1),
-}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride on the app door only")
+    ("write_day", "app", "sched.write_day", 1, 1),
+}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride, write_day on the app door only")
 # second open does not duplicate
 tools.open_db().close()
 con = tools.open_db()
@@ -98,13 +99,14 @@ try:
     n = con.execute("select count(*) from tools").fetchone()[0]
 finally:
     con.close()
-ok(n == 8, "seed is idempotent")
+ok(n == 9, "seed is idempotent")
 ok(sched.ACTIONS["sched.get_settings"]["doors"] == ("app",), "get_settings is app door only")
 ok(sched.ACTIONS["sched.change_setting"]["doors"] == ("app",), "change_setting is app door only")
 ok(sched.ACTIONS["sched.undo_change"]["doors"] == ("app",), "undo_change is app door only")
 ok(sched.ACTIONS["sched.places"]["doors"] == ("app",), "places is app door only")
 ok(sched.ACTIONS["sched.arrival"]["doors"] == ("app",), "arrival is app door only")
 ok(sched.ACTIONS["sched.log_ride"]["doors"] == ("app",), "log_ride is app door only")
+ok(sched.ACTIONS["sched.write_day"]["doors"] == ("app",), "write_day is app door only")
 ok("bot" not in sched.ACTIONS["sched.get_settings"]["doors"]
    and "bot" not in sched.ACTIONS["sched.change_setting"]["doors"]
    and "bot" not in sched.ACTIONS["sched.undo_change"]["doors"]
@@ -300,12 +302,12 @@ async def main():
     ok("get_schedule_settings" in at and "change_schedule_setting" in at and "undo_schedule_change" in at,
        "app door lists the schedule settings tools")
     ok("app_places" in at, "app door lists app_places")
-    ok("app_arrival" in at and "app_log_ride" in at, "app door lists app_arrival and app_log_ride")
+    ok("app_arrival" in at and "app_log_ride" in at and "write_day" in at, "app door lists app_arrival, app_log_ride, and write_day")
     ok("plan_week" not in at, "plan_week has no seeded row")
     ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt
        and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
        and "undo_schedule_change" not in bt and "app_places" not in bt
-       and "app_arrival" not in bt and "app_log_ride" not in bt,
+       and "app_arrival" not in bt and "app_log_ride" not in bt and "write_day" not in bt,
        "bot door has no scheduler tools")
     ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
        "admin tools stay off the app and bot doors")
