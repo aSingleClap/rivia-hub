@@ -55,7 +55,37 @@ load_env() {
     die "no .env in ~/.rivia or ~/rivia. Run: rivia setup"
 }
 
-alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+alive() {  # pidfile -> running AND still our process (a reused pid doesn't count)
+    local p want
+    [ -f "$1" ] && p="$(cat "$1")" && kill -0 "$p" 2>/dev/null || return 1
+    case "$1" in
+        *server.pid) want=rivia_server.py ;; *tunnel.pid) want=cloudflared ;; *watch.pid) want=watch-loop ;; *) return 0 ;;
+    esac
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q "$want"
+}
+
+healthy() { curl -fsS -m 5 -o /dev/null "$1" 2>/dev/null; }  # URL answers 2xx within 5s
+
+stray_servers() { pgrep -f '^[^ ]*python[^ ]* rivia_server\.py' ; }  # every rivia_server.py we run
+
+kill_strays() {  # a rivia_server.py not in server.pid (e.g. stopped/hung) would still hold :$PORT
+    local p
+    [ -n "$(stray_servers)" ] || return 0
+    for p in $(stray_servers); do
+        echo "server: killing stray rivia_server.py (pid $p)"; kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null
+    done
+    sleep 3
+    for p in $(stray_servers); do kill -9 "$p" 2>/dev/null; done
+}
+
+kill_pid() {  # pidfile: stop it even if hung (SIGSTOPped or wedged), then drop the pidfile
+    local p
+    if alive "$1"; then
+        p="$(cat "$1")"; kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null; sleep 3
+        kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+    fi
+    rm -f "$1"
+}
 
 get() {  # get URL -> prints body or ERROR
     python - "$1" <<'EOF'
@@ -81,6 +111,7 @@ start() {
         echo "server: already running"
     else
         cd "$CODE" || die "can't cd to $CODE"
+        kill_strays
         nohup python rivia_server.py --public >> "$LOGS/server.log" 2>&1 &
         echo $! > "$DATA/server.pid"
         sleep 4
@@ -101,13 +132,27 @@ start() {
     status
 }
 
-# Restarts the server or tunnel if either dies. Started by `start`, stopped by `stop`.
+# Restarts the server or tunnel if either dies, the server if local /health fails
+# RIVIA_WATCH_FAILS (3) checks in a row (hung), and the tunnel if public /health
+# fails that often while local is fine. Started by `start`, stopped by `stop`.
 watch_loop() {
+    local lf=0 pf=0 max="${RIVIA_WATCH_FAILS:-3}" w="$LOGS/watch.log"
     while true; do
         sleep "$WATCH_S"
         if ! alive "$DATA/server.pid" || ! alive "$DATA/tunnel.pid"; then
-            echo "$(date '+%F %T') server or tunnel down; restarting" >> "$LOGS/watch.log"
-            ( start ) >> "$LOGS/watch.log" 2>&1
+            echo "$(date '+%F %T') server or tunnel down; restarting" >> "$w"
+            ( start ) >> "$w" 2>&1; lf=0; pf=0; continue
+        fi
+        if healthy "http://127.0.0.1:$PORT/health"; then lf=0; else lf=$((lf + 1)); fi
+        if [ "$lf" -ge "$max" ]; then
+            echo "$(date '+%F %T') local /health failed $lf times; restarting server" >> "$w"
+            kill_pid "$DATA/server.pid"; ( start ) >> "$w" 2>&1; lf=0; pf=0; continue
+        fi
+        [ "$lf" -eq 0 ] || continue
+        if healthy "$PUBLIC"; then pf=0; else pf=$((pf + 1)); fi
+        if [ "$pf" -ge "$max" ]; then
+            echo "$(date '+%F %T') public /health failed $pf times; restarting tunnel" >> "$w"
+            kill_pid "$DATA/tunnel.pid"; ( start ) >> "$w" 2>&1; pf=0
         fi
     done
 }
