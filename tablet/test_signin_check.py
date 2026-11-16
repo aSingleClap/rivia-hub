@@ -287,7 +287,12 @@ payload = json.loads(r.stdout)
 ok(r.returncode == 1 and payload.get("ok") is False
    and payload["error"]["code"] == "calendar_login_expired",
    "python rivia_gcal.py signin-check exits 1 on expiry")
-ok(payload.get("notified") is False, "CLI second call the same day does not notify again")
+# The CLI uses the box clock, so its first call may be the first of the real day.
+# A second CLI call on that same day must not notify again.
+r2 = subprocess.run([sys.executable, os.path.join(HERE, "rivia_gcal.py"), "signin-check"],
+                    capture_output=True, text=True, env=os.environ, cwd=HERE)
+payload2 = json.loads(r2.stdout)
+ok(payload2.get("notified") is False, "CLI second call the same day does not notify again")
 
 
 # ── in-server loop: catch-up on start, then once a day ──

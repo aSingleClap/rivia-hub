@@ -239,7 +239,8 @@ ok("14:30" not in blob and "leave_home" not in blob and not (bad.get("data") or 
    "calendar failure returns no times")
 
 # Auth-failure hook: at most one first_today per New York day
-first = gcal.record_calendar_auth_failure(gcal.GcalError("calendar_login_expired", gcal.FIX_LOGIN), now=PLAN_NOW)
+# plan_day_sync records on the box clock, so check the same (real) day.
+first = gcal.record_calendar_auth_failure(gcal.GcalError("calendar_login_expired", gcal.FIX_LOGIN))
 # already recorded by plan_day_sync above
 ok(first["first_today"] is False and first["reason"] == "already_today",
    "auth failure is recorded at most once per day")
