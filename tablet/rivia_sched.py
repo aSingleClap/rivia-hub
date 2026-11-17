@@ -2021,7 +2021,7 @@ def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=
             con = rp.db_open()
             try:
                 rec = {
-                    "place": place or out.get("place"),
+                    "place": out.get("place") or place,  # resolved id (gymday -> gym/pf), so the repeat guard matches
                     "title": title,
                     "time": rp.iso(t_s),
                 }

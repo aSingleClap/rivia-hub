@@ -445,6 +445,13 @@ ok(sched.app_open_sync(now=on(19, 9, 5))["data"]["reason"] == "not_home", "no ru
 cli_open = sh_sched("call", "app_open", "{}")
 ok(cli_open.returncode == 0 and json.loads(cli_open.stdout)["kind"] == "open", "rivia sched call app_open answers")
 
+# an explicit place="gymday" is stored as the real gym, so the same-place guard sees the app's re-sent ENTER
+fake.items = []
+g1 = sched.arrival_sync(place="gymday", time=on(20, 11, 43).isoformat(), now=on(20, 11, 43, 2))
+ok(says(g1) and sched._load_last_arrival()["place"] == "gym", "gymday arrival: last_arrival holds the resolved gym id")
+g2 = sched.arrival_sync(place="gymday", time=on(20, 13, 39).isoformat(), now=on(20, 13, 39, 2))
+ok(quiet(g2, "repeat"), "gymday re-sent ENTER with no departure: quiet (1:39 PM repeat)")
+
 # Did not touch the box home database
 ok(os.path.abspath(rp.db_file()).startswith(os.path.abspath(TMP)),
    "the test database lives under the throwaway folder, not ~/rivia")
