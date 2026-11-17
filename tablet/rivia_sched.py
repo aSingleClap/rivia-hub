@@ -367,6 +367,7 @@ LAST_ARRIVAL_KEY = "last_arrival"
 META_LAST_DEPARTURE = "last_departure"      # {place, time}: the app's left_at for a same-place return
 META_MORNING_RUNDOWN = "morning_rundown_date"  # YYYY-MM-DD the good-morning rundown was given
 MORNING_FROM_H = 4                          # the rundown starts at 4:00 AM local time
+RUNDOWN_CUTOFF = (14, 30)                   # and stops at 2:30 PM local time: later opens give none
 APP_OPEN_DESCRIPTION = (
     "The Rivia app was opened. The first open each day after 4:00 AM at home returns the "
     "good-morning rundown (speak it); every other open returns a quiet reply (say false)."
@@ -2143,9 +2144,16 @@ def _quiet_arrival(reason, pid, title, t_s, late_m, ride_out):
     return _quiet("arrival", data, {"place": place_fact, "ignored": reason, "late_minutes": late_m})
 
 
+def _in_rundown_window(s):
+    """4:00 AM up to (not including) 2:30 PM, America/New_York."""
+    d = rp.dt(s)
+    return d.hour >= MORNING_FROM_H and (d.hour, d.minute) < RUNDOWN_CUTOFF
+
+
 def _rundown_due(t_s, now_s):
-    """The good-morning rundown is due: a fresh event after 4:00 AM, not given yet that day."""
-    if now_s - t_s > 10 * 60 or rp.day_key(t_s) != rp.day_key(now_s) or rp.dt(t_s).hour < MORNING_FROM_H:
+    """The good-morning rundown is due: a fresh event from 4:00 AM to 2:29 PM, not given yet that day.
+    Outside the window nothing is spoken and the day is NOT marked given."""
+    if now_s - t_s > 10 * 60 or rp.day_key(t_s) != rp.day_key(now_s) or not _in_rundown_window(t_s):
         return False
     con = rp.db_open()
     try:
@@ -2189,7 +2197,7 @@ def _morning_reply(kind, t_s, now, now_s, ride_out=None):
 
 
 def app_open_sync(now=None):
-    """The app was opened: the good-morning rundown once a day (after 4:00 AM, at home), else quiet."""
+    """The app was opened: the good-morning rundown once a day (4:00 AM to 2:29 PM, at home), else quiet."""
     if not selftest_ok():
         return fail("selftest_failed",
                     "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
@@ -2200,6 +2208,8 @@ def app_open_sync(now=None):
         reason = "not_home"
     elif rp.dt(now_s).hour < MORNING_FROM_H:
         reason = "before_morning"
+    elif not _in_rundown_window(now_s):
+        reason = "after_cutoff"
     elif not _rundown_due(now_s, now_s):
         reason = "already_given"
     else:

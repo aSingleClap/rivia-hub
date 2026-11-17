@@ -452,6 +452,25 @@ ok(says(g1) and sched._load_last_arrival()["place"] == "gym", "gymday arrival: l
 g2 = sched.arrival_sync(place="gymday", time=on(20, 13, 39).isoformat(), now=on(20, 13, 39, 2))
 ok(quiet(g2, "repeat"), "gymday re-sent ENTER with no departure: quiet (1:39 PM repeat)")
 
+# the rundown cutoff: 2:30 PM. Inside the window it is given, outside it is silent and NOT marked given.
+fake.items = []
+sched.arrival_sync(place="home", time=on(23, 7, 30).isoformat(), now=on(23, 7, 30, 2))
+o_1429 = sched.app_open_sync(now=on(23, 14, 29))
+ok(o_1429["data"].get("rundown") is True and o_1429["message"]["delivery"]["say"] is True, "app_open at 2:29 PM: the rundown")
+sched.rp.set_meta(sched.rp.db_open(), sched.META_MORNING_RUNDOWN, "")  # not given, to test the cutoff
+o_1430 = sched.app_open_sync(now=on(23, 14, 30))
+ok(o_1430["data"] == {"rundown": False, "reason": "after_cutoff"} and o_1430["message"]["delivery"]["say"] is False
+   and o_1430["fallback_text"] == "", "app_open at 2:30 PM: silent, no rundown")
+ok(sched.rp.get_meta(sched.rp.db_open(), sched.META_MORNING_RUNDOWN) != "2026-11-23", "2:30 PM open does not mark the day given")
+o_2300 = sched.app_open_sync(now=on(23, 23, 0))
+ok(o_2300["data"]["reason"] == "after_cutoff" and o_2300["message"]["delivery"]["say"] is False, "app_open at 11:00 PM: silent")
+rep = home_at(on(23, 23, 5))
+ok(quiet(rep, "repeat") and rep["data"].get("rundown") is None, "a repeat arrival home at 11:05 PM: quiet, no Good morning")
+ok(sched.rp.get_meta(sched.rp.db_open(), sched.META_MORNING_RUNDOWN) != "2026-11-23", "11 PM still not marked given")
+nxt = sched.app_open_sync(now=on(24, 4, 1))
+ok(nxt["data"].get("rundown") is True and nxt["message"]["delivery"]["say"] is True, "next day 4:01 AM: the rundown works normally")
+ok(sched.app_open_sync(now=on(24, 14, 29, 59))["data"]["reason"] == "already_given", "once given, 2:29 PM is already_given")
+
 # Did not touch the box home database
 ok(os.path.abspath(rp.db_file()).startswith(os.path.abspath(TMP)),
    "the test database lives under the throwaway folder, not ~/rivia")
