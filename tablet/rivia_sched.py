@@ -288,9 +288,18 @@ SETTINGS = {
     "ride_max_hours":        {"planner": "rideMaxH",       "default": 3,    "min": 1,    "max": 8,    "type": "int",   "unit": "hours",   "label": "Ride max hours",           "day": False, "ask": False, "group": "system"},
     "clean_low_ratio":       {"planner": "cleanLow",       "default": 0.25, "min": 0.05, "max": 0.9,  "type": "float", "unit": "ratio",   "label": "Clean-ride low ratio",    "day": False, "ask": False, "group": "system"},
     "clean_high_ratio":      {"planner": "cleanHigh",      "default": 2,    "min": 1.1,  "max": 5,    "type": "float", "unit": "ratio",   "label": "Clean-ride high ratio",   "day": False, "ask": False, "group": "system"},
+    "arrival_late_minutes":  {"planner": None,             "default": 10,   "min": 2,    "max": 120,  "type": "int",   "unit": "minutes", "label": "Late arrival cutoff",      "day": False, "ask": False, "group": "system", "doors": ("termux", "admin")},
 }
 
-RIDE_PLACES = ("farm", "gym", "hmc", "home", "pf")  # alphabetical
+RIDE_PLACES = ("farm", "gym", "hmc", "home", "pf")  # alphabetical; the core places
+# Places in the settings store (JOB-007): place.<id>.pin / radius_m / name for every place,
+# plus status (active | removed) for Jordan's own places. A custom place exists once it has a
+# standing name. rp.PLACES stays the seed and fallback for the five core places.
+PLACE_FIELDS = ("pin", "radius_m", "name", "status")
+PLACE_DOORS = ("termux", "admin", "web", "app", "system")
+RADIUS_MIN, RADIUS_MAX, RADIUS_STEP = 50, 400, 25
+_PLACES_SAY_DEFAULT = {pid: p["say"] for pid, p in rp.PLACES.items()}
+DUP_ARRIVAL_S = 20 * 60   # same place again within 20 min: a repeat, not a new arrival
 GYM_HOUR_FIELDS = {
     "weekday_open": "weekdayOpen", "weekday_close": "weekdayClose",
     "weekend_open": "weekendOpen", "weekend_close": "weekendClose",
@@ -323,12 +332,23 @@ GET_SETTINGS_DESCRIPTION = (
 CHANGE_SETTING_DESCRIPTION = (
     "Change one of Jordan's schedule settings. scope is day (that date only, today "
     "through 14 days ahead) or standing. A standing change from this door is not "
-    "applied until it is approved; the reply is pending. A pending result has not "
-    "happened yet. Out-of-range or inconsistent values are refused with the reason."
+    "applied until it is approved (zone sizes are the exception); the reply is pending. "
+    "A pending result has not happened yet. Out-of-range or inconsistent values are "
+    "refused with the reason. Zone sizes: key place.<place>.radius_m, where <place> is "
+    "home, farm, gym, pf, hmc, or the name of one of his own places; scope standing; "
+    "value in meters (50 to 400), or bigger / smaller for 25 m a step. A zone size "
+    "applies right away; say the reply's fallback_text. Undo puts the old size back."
 )
 UNDO_CHANGE_DESCRIPTION = (
     "Undo a schedule setting change. With no change_id, undo the latest change made "
-    "through this door in the last 24 hours. Restores the old value and logs a new change."
+    "through this door in the last 24 hours. Restores the old value and logs a new change. "
+    "Undoing a zone size (place.<place>.radius_m) applies right away; say the reply's fallback_text."
+)
+PIN_PLACE_DESCRIPTION = (
+    "Pin one of Jordan's places at the phone's current position. coords is lat,lng from "
+    "the phone. place re-pins an existing place (id or name); name adds a new place. "
+    "radius_m (50 to 400) sets a new place's zone size. A pin from this door waits for "
+    "approval; a pending result has not happened yet."
 )
 PLACES_DESCRIPTION = (
     "Jordan's places for geofences: each place's id, spoken name, pin (lat, lng), "
@@ -434,6 +454,17 @@ def _coerce(spec, value):
         return {"lat": parsed["lat"], "lng": parsed["lng"]}
     if typ == "time":
         return _coerce_time(spec, value)
+    if typ == "name":
+        text = " ".join(str(value if value is not None else "").split())
+        if not (1 <= len(text) <= 40) or not re.fullmatch(r"[\w '&-]+", text):
+            raise SettingsError("bad_value", "A place name is 1 to 40 letters, digits, spaces, - ' or &.",
+                                step="input")
+        return text
+    if typ == "choice":
+        text = str(value if value is not None else "").strip().lower()
+        if text not in spec["choices"]:
+            raise SettingsError("bad_value", "Expected one of: %s." % ", ".join(spec["choices"]), step="input")
+        return text
     if typ == "int":
         if isinstance(value, bool) or (isinstance(value, str) and value.lower() in ("true", "false")):
             raise SettingsError("bad_value", "Expected a whole number.", step="input")
@@ -502,21 +533,34 @@ def _parse_key(key):
         }
     if key.startswith("place."):
         parts = key.split(".")
-        if len(parts) != 3 or parts[1] not in RIDE_PLACES:
+        if len(parts) != 3 or not (parts[1] in RIDE_PLACES or rp.CUSTOM_ID.match(parts[1])):
             raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
-        if parts[2] != "pin":
-            raise SettingsError(
-                "bad_key",
-                "Place address and spoken name can only be changed from the web app.",
-                step="input",
-            )
-        label = "%s pin" % (rp.PLACES[parts[1]]["say"],)
-        return {
-            "key": key, "family": "place", "place_id": parts[1], "field": "pin",
-            "default": None, "min": None, "max": None, "type": "pin", "unit": "lat,lng",
-            "label": label, "day": False, "ask": False, "group": "places",
-            "doors": ("termux", "admin", "web"),
-        }
+        return _place_spec(key, parts[1], parts[2])
+    raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
+
+
+def _cap(text):
+    return text[:1].upper() + text[1:]
+
+
+def _place_spec(key, pid, field):
+    core = pid in RIDE_PLACES
+    say = _PLACES_SAY_DEFAULT[pid] if core else pid
+    base = {"key": key, "family": "place", "place_id": pid, "field": field, "core": core,
+            "day": False, "ask": True, "group": "places", "doors": PLACE_DOORS}
+    if field == "pin":
+        return dict(base, default=None, min=None, max=None, type="pin", unit="lat,lng", label="%s pin" % _cap(say))
+    if field == "radius_m":
+        return dict(base, default=None, min=RADIUS_MIN, max=RADIUS_MAX, type="int", unit="meters",
+                    label="%s zone size" % _cap(say))
+    if field == "name":
+        return dict(base, default=say if core else None, min=1, max=40, type="name", unit="text",
+                    label="%s name" % _cap(say))
+    if field == "status":
+        if core:
+            raise SettingsError("core_place", "%s is a core place and can't be removed." % _cap(say), step="input")
+        return dict(base, default="active", min=None, max=None, type="choice", choices=("active", "removed"),
+                    unit="status", label="%s status" % _cap(say))
     raise SettingsError("bad_key", "Unknown setting: %s." % key, step="input")
 
 
@@ -536,17 +580,33 @@ def _gym_keys():
     return out
 
 
-def _place_keys():
-    return ["place.%s.pin" % pid for pid in RIDE_PLACES]
+def _custom_place_ids(con):
+    """Jordan's own places (active and removed): every custom id with a standing name."""
+    ids = set()
+    for (key,) in con.execute("select key from settings where key like 'place.%.name'"):
+        pid = key.split(".")[1]
+        if pid not in RIDE_PLACES and rp.CUSTOM_ID.match(pid):
+            ids.add(pid)
+    return sorted(ids)
 
 
-def _all_setting_keys():
-    return list(SETTINGS) + _ride_keys() + _gym_keys() + _place_keys()
+def _place_keys(con=None):
+    out = []
+    for pid in RIDE_PLACES:
+        out += ["place.%s.%s" % (pid, f) for f in ("pin", "radius_m", "name")]
+    if con is not None:
+        for pid in _custom_place_ids(con):
+            out += ["place.%s.%s" % (pid, f) for f in PLACE_FIELDS]
+    return out
 
 
-def _keys_for_group(group):
+def _all_setting_keys(con=None):
+    return list(SETTINGS) + _ride_keys() + _gym_keys() + _place_keys(con)
+
+
+def _keys_for_group(group, con=None):
     group = (group or "schedule").strip().lower()
-    keys = _all_setting_keys()
+    keys = _all_setting_keys(con)
     if group in ("all", "*"):
         return keys
     return [k for k in keys if _parse_key(k)["group"] == group]
@@ -586,7 +646,7 @@ def _resolved(con, key, day=None):
 
 def _all_resolved(con, day=None, extra=None):
     out = {}
-    for key in _all_setting_keys():
+    for key in _all_setting_keys(con):
         val, src = _resolved(con, key, day=day)
         out[key] = (val, src)
     if extra:
@@ -600,6 +660,7 @@ def _snapshot():
         "cfg": dict(rp.CFG),
         "legs": dict(rp.MEASURED_LEGS),
         "gym": {k: dict(v) for k, v in rp.GYM_HOURS.items()},
+        "say": {pid: p["say"] for pid, p in rp.PLACES.items()},
     }
 
 
@@ -611,6 +672,8 @@ def _restore(snap):
     for gid, hours in snap["gym"].items():
         rp.GYM_HOURS[gid].clear()
         rp.GYM_HOURS[gid].update(hours)
+    for pid, say in snap.get("say", {}).items():
+        rp.PLACES[pid]["say"] = say
 
 
 def _apply_one(key, value):
@@ -625,7 +688,9 @@ def _apply_one(key, value):
         rp.MEASURED_LEGS[rp.leg_key(spec["a"], spec["b"])] = value
     elif spec["family"] == "gym":
         rp.GYM_HOURS[spec["gym_id"]][spec["field"]] = value
-    # place pins live in places.json, not in the planner module.
+    elif spec["family"] == "place" and spec["field"] == "name" and spec["place_id"] in rp.PLACES:
+        rp.PLACES[spec["place_id"]]["say"] = value
+    # place pins and zone sizes live in places.json, not in the planner module.
 
 
 def _apply_resolved(resolved):
@@ -637,6 +702,8 @@ def _apply_resolved(resolved):
     for gid, hours in _GYM_DEFAULT.items():
         rp.GYM_HOURS[gid].clear()
         rp.GYM_HOURS[gid].update(hours)
+    for pid, say in _PLACES_SAY_DEFAULT.items():
+        rp.PLACES[pid]["say"] = say
     for key, (val, _src) in resolved.items():
         if val is not None:
             _apply_one(key, val)
@@ -697,24 +764,53 @@ def geofence_radius_m(resolved=None, con=None):
     return int(SETTINGS["geofence_radius_meters"]["default"])
 
 
-def _pin_spacing_problems(resolved):
-    """Pins must stay at least 2× the geofence radius apart so gym and work do not overlap."""
-    radius = geofence_radius_m(resolved)
-    min_m = 2 * radius
+def _rval(resolved, key):
+    return (resolved.get(key) or (None, None))[0]
+
+
+def place_radius_m(resolved, pid):
+    """A place's zone size: its own place.<id>.radius_m, else geofence_radius_meters."""
+    own = _rval(resolved, "place.%s.radius_m" % pid)
+    return int(own) if own is not None else geofence_radius_m(resolved)
+
+
+def _place_status(resolved, pid):
+    return "active" if pid in RIDE_PLACES else (_rval(resolved, "place.%s.status" % pid) or "active")
+
+
+def _place_name(resolved, pid):
+    return _rval(resolved, "place.%s.name" % pid) or _PLACES_SAY_DEFAULT.get(pid) or pid
+
+
+def _pinned_places(resolved):
+    """Active places with a pin, core first (alphabetical) then custom: id -> pin."""
+    ids = []
+    for key in resolved:
+        parts = key.split(".")
+        if len(parts) == 3 and parts[0] == "place" and parts[2] == "pin" and parts[1] not in ids:
+            ids.append(parts[1])
+    ids.sort(key=lambda p: (p not in RIDE_PLACES, p))
     pins = {}
-    for pid in RIDE_PLACES:
-        val = (resolved.get("place.%s.pin" % pid) or (None, None))[0]
-        if val and isinstance(val, dict) and "lat" in val and "lng" in val:
+    for pid in ids:
+        val = _rval(resolved, "place.%s.pin" % pid)
+        if val and isinstance(val, dict) and "lat" in val and "lng" in val and _place_status(resolved, pid) == "active":
             pins[pid] = val
+    return pins
+
+
+def _pin_spacing_problems(resolved):
+    """Zones must not overlap: two pins at least the sum of their zone sizes apart."""
+    pins = _pinned_places(resolved)
     problems = []
     ids = list(pins)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             d = rp.meters_between(pins[a], pins[b])
-            if d < min_m:
+            ra, rb = place_radius_m(resolved, a), place_radius_m(resolved, b)
+            if d < ra + rb:
                 problems.append(
                     "The %s and %s pins are %.1f m apart; they must be at least %d m "
-                    "apart (2× the %d m geofence radius)." % (a, b, d, min_m, radius)
+                    "apart (zones of %d m and %d m)." % (a, b, d, ra + rb, ra, rb)
                 )
     return problems
 
@@ -1049,8 +1145,71 @@ def change_setting_sync(key, value, scope, day=None, reason=None, request_id=Non
             con.close()
 
 
+def _resolve_place_id(con, text):
+    """A place id from an id or a spoken name ("Giant", "the farm", "work"), or None."""
+    t = " ".join(str(text or "").replace("_", " ").split()).lower()
+    if not t:
+        return None
+    known = list(RIDE_PLACES) + _custom_place_ids(con)
+    if t.replace(" ", "_") in known:
+        return t.replace(" ", "_")
+
+    def bare(x):
+        return x[4:] if x.startswith("the ") else x
+    for pid in known:
+        name = " ".join(str(_resolved(con, "place.%s.name" % pid)[0] or "").split()).lower()
+        if name and (t == name or bare(t) == bare(name)):
+            return pid
+    return None
+
+
+def _place_key(con, key):
+    """place.<name or id>.<field> -> place.<id>.<field>, so place.Giant.radius_m works."""
+    key = (key or "").strip()
+    parts = key.split(".")
+    if len(parts) == 3 and parts[0] == "place":
+        pid = _resolve_place_id(con, parts[1])
+        if pid:
+            return "place.%s.%s" % (pid, parts[2].strip().lower())
+    return key
+
+
+def _place_display(con, pid):
+    return _cap(str(_resolved(con, "place.%s.name" % pid)[0] or pid))
+
+
+def _effective_radius(con, pid):
+    own = _resolved(con, "place.%s.radius_m" % pid)[0]
+    return int(own) if own is not None else geofence_radius_m(con=con)
+
+
+def _radius_value(con, spec, value):
+    """bigger / smaller (25 m) or +N / -N from the current zone size, kept within 50-400.
+    Returns (value, relative)."""
+    if not isinstance(value, str):
+        return value, False
+    text = value.strip().lower()
+    m = re.fullmatch(r"(\d+)\s*(m|meters|metres)?", text)
+    if m:
+        return int(m.group(1)), False
+    steps = {"bigger": RADIUS_STEP, "larger": RADIUS_STEP, "smaller": -RADIUS_STEP}
+    if text in steps:
+        step = steps[text]
+    elif re.fullmatch(r"[+-]\s*\d+", text):
+        step = int(text.replace(" ", ""))
+    else:
+        return value, False
+    cur = _effective_radius(con, spec["place_id"])
+    return max(RADIUS_MIN, min(RADIUS_MAX, cur + step)), True
+
+
+def _applies_now_from_app(spec):
+    """App-door standing changes wait for approval (G7), except zone sizes: small, bounded, undoable."""
+    return spec.get("family") == "place" and spec.get("field") == "radius_m"
+
+
 def _change_setting(con, key, value, scope, day=None, reason=None, request_id=None,
-                    door="app", now=None):
+                    door="app", now=None, new_place=None):
     now = now or datetime.now(gcal.TZ)
     now_s = int(now.timestamp()) if hasattr(now, "timestamp") else rp.now_s()
     today = _today_date(now)
@@ -1058,8 +1217,16 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
     door = (door or "app").strip().lower()
     if scope not in ("day", "standing"):
         raise SettingsError("bad_scope", "scope must be day or standing.", step="input")
-    spec = _parse_key(key)
+    spec = _parse_key(_place_key(con, key))
     key = spec["key"]
+    is_place = spec["family"] == "place"
+    relative = False
+    if is_place:
+        if not spec["core"] and not new_place and spec["place_id"] not in _custom_place_ids(con):
+            raise SettingsError("bad_place", "There is no place called %s. Pin your location to add it."
+                                % spec["place_id"], step="input")
+        if spec["field"] == "radius_m":
+            value, relative = _radius_value(con, spec, value)
     coerced = _coerce(spec, value)
     value_s = _store_value(coerced)
     day_s = None
@@ -1096,12 +1263,18 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
         )
     if door == "app" and not spec.get("ask", True) and not spec["day"]:
         raise SettingsError("bad_key", "This setting cannot be changed from the app door.", step="input")
+    if relative and coerced == _effective_radius(con, spec["place_id"]):
+        edge = " (the smallest zone)" if coerced == RADIUS_MIN else " (the largest zone)" if coerced == RADIUS_MAX else ""
+        raise SettingsError("no_change", "%s is already %d m%s." % (_place_display(con, spec["place_id"]), coerced, edge),
+                            step="settings")
 
     pending = _find_pending(con, door, key, value_s, scope, day_s, request_id, now_s)
     if pending:
         return _pending_result(con, pending, duplicate=True)
 
     dup = _find_duplicate(con, door, key, value_s, scope, day_s, request_id, now_s)
+    if dup and is_place and _resolved(con, key, day=day_s)[0] != coerced:
+        dup = None  # the value moved since (an undo, another resize): this is a new change
     if dup:
         data = _setting_result(con, key, dup[5], scope, dup[0], _load_value(dup[7]) if dup[7] else None,
                                _load_value(dup[8]) if dup[8] else None, duplicate=True, status=dup[10])
@@ -1109,6 +1282,13 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
 
     old, _old_src = _resolved(con, key, day=day_s)
     extra = {key: coerced}
+    if isinstance(new_place, dict):
+        pid = spec["place_id"]
+        extra["place.%s.name" % pid] = new_place.get("name")
+        extra["place.%s.status" % pid] = "active"
+        if new_place.get("radius_m") is not None:
+            extra["place.%s.radius_m" % pid] = new_place["radius_m"]
+    old_radius = _effective_radius(con, spec["place_id"]) if is_place and spec["field"] == "radius_m" else None
 
     # Check 2: consistent with the others.
     resolved = _all_resolved(con, day=day_s, extra=extra)
@@ -1131,10 +1311,13 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
     # Check 4: log, then apply — or queue as pending for an app-door standing change (G7).
     change_id = _new_id()
     created = rp.iso(now_s)
-    if door == "app" and scope == "standing":
+    if door == "app" and scope == "standing" and not _applies_now_from_app(spec):
+        pv = {"asked": _asked_of(door)}
+        if isinstance(new_place, dict):
+            pv["new_place"] = {k: v for k, v in new_place.items() if v is not None}
         _log_change(con, change_id=change_id, created=created, door=door, kind="setting",
                     scope=scope, day=day_s, key=key, old=_store_value(old) if old is not None else None,
-                    new=value_s, preview=json.dumps({"asked": _asked_of(door)}),
+                    new=value_s, preview=json.dumps(pv),
                     status="pending", decided=None, reason=reason, request_id=request_id)
         data = _setting_result(con, key, day_s, scope, change_id, old, coerced,
                                duplicate=False, status="pending")
@@ -1159,8 +1342,11 @@ def _change_setting(con, key, value, scope, day=None, reason=None, request_id=No
                 new=value_s, preview=preview, status="applied", decided=created,
                 reason=reason, request_id=request_id)
     data["reason"] = reason
-    if spec["family"] == "place" and spec.get("field") == "pin":
+    if is_place:
         data["places_file"] = rewrite_places_file(con)
+        if spec["field"] == "radius_m":
+            data["say"] = "%s is now %d m (was %d). Say undo to put it back." % (
+                _place_display(con, spec["place_id"]), coerced, old_radius)
     return data
 
 
@@ -1173,9 +1359,12 @@ def undo_change_sync(change_id=None, door="app", now=None, con=None):
     try:
         out = _undo_change(con, change_id=change_id, door=door, now=now)
         key = (out or {}).get("key") or ""
-        if key.startswith("place.") and key.endswith(".pin"):
+        if key.startswith("place."):
             out = dict(out)
             out["places_file"] = rewrite_places_file(con)
+            parts = key.split(".")
+            if len(parts) == 3 and parts[2] == "radius_m" and out.get("status") == "applied":
+                out["say"] = "%s is back to %d m." % (_place_display(con, parts[1]), _effective_radius(con, parts[1]))
         return out
     finally:
         if close:
@@ -1213,8 +1402,9 @@ def _undo_change(con, change_id=None, door="app", now=None):
     # so it goes pending until approved.
     old = _load_value(old_s) if old_s is not None else None
     if scope == "standing":
-        if door == "app":
-            restore = old if old is not None else _parse_key(key).get("default")
+        spec_u = _parse_key(key)
+        if door == "app" and not _applies_now_from_app(spec_u):
+            restore = old if old is not None else spec_u.get("default")
             out = _change_setting(con, key, restore, "standing", reason="undo %s" % cid,
                                   door=door, now=now)
             out["undo_of"] = cid
@@ -1223,7 +1413,12 @@ def _undo_change(con, change_id=None, door="app", now=None):
             con.execute("delete from settings where key=?", (key,))
         else:
             # Restore through the same checks.
-            return _change_setting(con, key, old, "standing", reason="undo %s" % cid, door=door, now=now)
+            out = _change_setting(con, key, old, "standing", reason="undo %s" % cid, door=door, now=now)
+            if spec_u["family"] == "place":
+                out["undo_of"] = cid
+                out.pop("say", None)
+                con.execute("update changes set status='undone', decided=? where change_id=?", (rp.iso(now_s), cid))
+            return out
     else:
         if not day_s:
             raise SettingsError("bad_change", "Change %s has no day to restore." % cid, step="settings")
@@ -1283,7 +1478,7 @@ def get_settings_sync(group="schedule", day=None, now=None, con=None):
             day_d = today
         day_s = day_d.isoformat()
         items = []
-        for key in _keys_for_group(group):
+        for key in _keys_for_group(group, con):
             spec = _parse_key(key)
             val, src = _resolved(con, key, day=day_s)
             item = {
@@ -1389,7 +1584,7 @@ def change_setting_tool(key: str, scope: str, value: Union[str, int, float],
         if data.get("status") == "pending":
             message = message or PENDING_MESSAGE
         return ok_reply(kind, data, ref=data.get("change_id"),
-                        message=message, alerts=alerts)
+                        message=message, alerts=alerts, fallback_text=data.get("say"))
     except SettingsError as e:
         return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
@@ -1408,7 +1603,7 @@ def undo_change_tool(change_id: str | None = None) -> dict:
         data = undo_change_sync(change_id=change_id, door="app")
         data, alerts, message = maybe_refresh_alerts(data)
         return ok_reply("undo", data, ref=data.get("change_id"),
-                        message=message, alerts=alerts)
+                        message=message, alerts=alerts, fallback_text=data.get("say"))
     except SettingsError as e:
         return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
@@ -1426,11 +1621,21 @@ def rewrite_places_file(con=None):
         ensure_store(con)
         close = True
     try:
+        resolved = _all_resolved(con)
         pins = {}
-        for pid in RIDE_PLACES:
-            val, _src = _resolved(con, "place.%s.pin" % pid)
-            if val and isinstance(val, dict) and "lat" in val and "lng" in val:
-                pins[pid] = {"lat": val["lat"], "lng": val["lng"]}
+        for pid in list(RIDE_PLACES) + _custom_place_ids(con):
+            val = _rval(resolved, "place.%s.pin" % pid)
+            if not (val and isinstance(val, dict) and "lat" in val and "lng" in val):
+                continue
+            entry = {"lat": val["lat"], "lng": val["lng"], "name": _place_name(resolved, pid)}
+            own = _rval(resolved, "place.%s.radius_m" % pid)
+            if own is not None:
+                entry["radius_m"] = int(own)
+            if pid not in RIDE_PLACES:
+                entry["custom"] = True
+                if _place_status(resolved, pid) == "removed":
+                    entry["removed"] = True
+            pins[pid] = entry
         path = rp.PLACES_FILE
         parent = os.path.dirname(path)
         if parent:
@@ -1447,23 +1652,30 @@ def rewrite_places_file(con=None):
 
 
 def places_sync(con=None):
-    """Each known place: id, spoken name, lat, lng, and the current geofence radius."""
+    """Each place for geofences: id, spoken name, lat, lng, and its own zone size (radius_m).
+    The five core places always; Jordan's own places while active and pinned.
+    The top-level radius_m is the default zone size (geofence_radius_meters), for old clients."""
     close = False
     if con is None:
         con = rp.db_open()
         ensure_store(con)
         close = True
     try:
-        radius = geofence_radius_m(con=con)
+        resolved = _all_resolved(con)
+        radius = geofence_radius_m(resolved)
         items = []
-        for pid in RIDE_PLACES:
-            pin, _src = _resolved(con, "place.%s.pin" % pid)
+        for pid in list(RIDE_PLACES) + _custom_place_ids(con):
+            core = pid in RIDE_PLACES
+            pin = _rval(resolved, "place.%s.pin" % pid)
+            if not core and (not pin or _place_status(resolved, pid) != "active"):
+                continue
             items.append({
                 "id": pid,
-                "spoken_name": rp.PLACES[pid]["say"],
+                "spoken_name": _place_name(resolved, pid),
                 "lat": None if not pin else pin.get("lat"),
                 "lng": None if not pin else pin.get("lng"),
-                "radius_m": radius,
+                "radius_m": place_radius_m(resolved, pid),
+                "custom": not core,
             })
         return {"places": items, "radius_m": radius}
     finally:
@@ -1486,6 +1698,204 @@ def places_tool() -> dict:
 
 
 places = tool(places_tool)
+
+
+@contextmanager
+def _con(con=None):
+    if con is not None:
+        yield con
+        return
+    con = rp.db_open()
+    try:
+        ensure_store(con)
+        yield con
+    finally:
+        con.close()
+
+
+def _slug(name):
+    s = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    if s.startswith("the_"):
+        s = s[4:]
+    s = s[:24].strip("_")
+    if not s or not s[0].isalpha():
+        s = ("place_" + s)[:24].strip("_")
+    return s
+
+
+def seed_places(con=None, now=None):
+    """Store each core place's name (and its pin from places.json if the store has none), once.
+    Safe to run again: a second run writes nothing. Zone sizes are not seeded, so every place
+    without its own size keeps using geofence_radius_meters."""
+    file_pins = rp.place_pins()
+    seeded = []
+    with _con(con) as c:
+        for pid in RIDE_PLACES:
+            todo = []
+            if _standing_row(c, "place.%s.name" % pid) is None:
+                todo.append(("place.%s.name" % pid, _PLACES_SAY_DEFAULT[pid]))
+            if _standing_row(c, "place.%s.pin" % pid) is None and pid in file_pins:
+                todo.append(("place.%s.pin" % pid, file_pins[pid]))
+            for key, val in todo:
+                d = _change_setting(c, key, val, "standing", reason="job-007 places seed", door="system", now=now)
+                seeded.append({"key": key, "value": d["value"], "change_id": d["change_id"]})
+                print("rivia: seeded %s=%s (standing)" % (key, json.dumps(d["value"])), file=sys.stderr)
+        return {"seeded": seeded, "places_file": rewrite_places_file(c) if seeded else None}
+
+
+def list_places(con=None):
+    """Every place, removed ones too: id, name, pin, zone size, core or custom, status."""
+    with _con(con) as c:
+        resolved = _all_resolved(c)
+        out = []
+        for pid in list(RIDE_PLACES) + _custom_place_ids(c):
+            pin = _rval(resolved, "place.%s.pin" % pid)
+            out.append({
+                "id": pid, "name": _place_name(resolved, pid),
+                "lat": pin.get("lat") if pin else None, "lng": pin.get("lng") if pin else None,
+                "radius_m": place_radius_m(resolved, pid),
+                "own_radius": _rval(resolved, "place.%s.radius_m" % pid) is not None,
+                "core": pid in RIDE_PLACES, "status": _place_status(resolved, pid),
+            })
+        return {"places": out, "default_radius_m": geofence_radius_m(resolved)}
+
+
+def _known_place(con, text):
+    pid = _resolve_place_id(con, text)
+    if not pid:
+        raise SettingsError("bad_place", "There is no place called %s. Places: %s." % (
+            str(text or "(none)").strip(), ", ".join(list(RIDE_PLACES) + _custom_place_ids(con))), step="input")
+    return pid
+
+
+def _check_new_place(con, name, pin=None, radius=None):
+    """Validate a new place's name, id, pin and size together before anything is written."""
+    name = _coerce(_place_spec("place.x.name", "x", "name"), name)
+    pid = _slug(name)
+    taken = _resolve_place_id(con, name)
+    if taken and (taken in RIDE_PLACES or _place_status(_all_resolved(con), taken) == "active"):
+        raise SettingsError("place_exists", "%s is already a place (%s). Pin it to move it." % (name, taken), step="input")
+    if pid in RIDE_PLACES:
+        raise SettingsError("place_exists", "%s is a core place. Pin it to move it." % _cap(pid), step="input")
+    if pid in _custom_place_ids(con) and _place_status(_all_resolved(con), pid) == "active":
+        raise SettingsError("place_exists", "%s is already a place. Pin it to move it." % name, step="input")
+    extra = {"place.%s.name" % pid: name, "place.%s.status" % pid: "active"}
+    if radius is not None:
+        radius = _coerce(_place_spec("place.x.radius_m", "x", "radius_m"), radius)
+        extra["place.%s.radius_m" % pid] = radius
+    if pin is not None:
+        pin = _coerce(_place_spec("place.x.pin", "x", "pin"), pin)
+        extra["place.%s.pin" % pid] = pin
+    problems = _consistency_problems(_all_resolved(con, extra=extra))
+    if problems:
+        raise SettingsError("inconsistent", problems[0], step="settings", extra={"problems": problems})
+    return pid, name, pin, radius
+
+
+def add_place(name, lat, lng, radius_m=None, door="termux", now=None, con=None):
+    """Add one of Jordan's own places (or bring back a removed one) with its pin, right away."""
+    with _con(con) as c:
+        pid, name, pin, radius = _check_new_place(c, name, {"lat": lat, "lng": lng}, radius_m)
+        reason = "add place %s" % name
+        _change_setting(c, "place.%s.name" % pid, name, "standing", reason=reason, door=door, now=now, new_place=True)
+        if _standing_row(c, "place.%s.status" % pid) is not None:
+            _change_setting(c, "place.%s.status" % pid, "active", "standing", reason=reason, door=door, now=now)
+        if radius is not None:
+            _change_setting(c, "place.%s.radius_m" % pid, radius, "standing", reason=reason, door=door, now=now)
+        _change_setting(c, "place.%s.pin" % pid, pin, "standing", reason=reason, door=door, now=now)
+        return {"added": pid, "name": name, "places_file": rewrite_places_file(c),
+                "place": [p for p in list_places(c)["places"] if p["id"] == pid][0]}
+
+
+def rename_place(place, name, door="termux", now=None, con=None):
+    """Change a place's spoken name (core places keep their id and role)."""
+    with _con(con) as c:
+        pid = _known_place(c, place)
+        name = _coerce(_place_spec("place.x.name", "x", "name"), name)
+        other = _resolve_place_id(c, name)
+        if other and other != pid:
+            raise SettingsError("place_exists", "%s is already the name of %s." % (name, other), step="input")
+        return _change_setting(c, "place.%s.name" % pid, name, "standing", reason="rename", door=door, now=now)
+
+
+def remove_place(place, door="termux", now=None, con=None):
+    """Remove one of Jordan's own places (soft: its rides and settings stay). Core places can't be removed."""
+    with _con(con) as c:
+        pid = _known_place(c, place)
+        key = "place.%s.status" % pid
+        _parse_key(key)  # refuses a core place in plain words
+        if _resolved(c, key)[0] == "removed":
+            raise SettingsError("no_change", "%s is already removed." % _place_display(c, pid), step="settings")
+        return _change_setting(c, key, "removed", "standing", reason="remove place", door=door, now=now)
+
+
+def set_zone(place, meters, door="termux", now=None, con=None):
+    """Set a place's zone size (meters, or bigger / smaller / +N / -N)."""
+    with _con(con) as c:
+        pid = _known_place(c, place)
+        return _change_setting(c, "place.%s.radius_m" % pid, meters, "standing", reason="zone size",
+                               door=door, now=now)
+
+
+def pin_place_sync(coords, place=None, name=None, radius_m=None, door="app", now=None, con=None):
+    """Pin my location: re-pin a known place, or add a new one by name. From the app door the pin
+    waits for approval (G7); a new place gets one pending change that carries its name."""
+    with _con(con) as c:
+        if coords in (None, ""):
+            raise SettingsError("bad_value", "coords (lat,lng from the phone) are required.", step="input")
+        target = _resolve_place_id(c, place) if place else None
+        if place and not target:
+            raise SettingsError("bad_place", "There is no place called %s. Give a name to add it." % place, step="input")
+        if not target and name:
+            target = _resolve_place_id(c, name)
+            if target and target not in RIDE_PLACES and _place_status(_all_resolved(c), target) != "active":
+                target = None  # a removed place: add it back
+        if target:
+            data = _change_setting(c, "place.%s.pin" % target, coords, "standing",
+                                   reason="pin my location", door=door, now=now)
+            data["place_id"], data["name"] = target, str(_resolved(c, "place.%s.name" % target)[0] or target)
+            data["new_place"] = False
+        else:
+            if not name:
+                raise SettingsError("bad_value", "Say which place to pin, or a name for a new one.", step="input")
+            if door != "app":
+                out = add_place(name, *_pin_parts(coords), radius_m=radius_m, door=door, now=now, con=c)
+                return dict(out, status="applied", place_id=out["added"], new_place=True)
+            pid, name, pin, radius = _check_new_place(c, name, coords, radius_m)
+            data = _change_setting(c, "place.%s.pin" % pid, pin, "standing", reason="new place: %s" % name,
+                                   door=door, now=now, new_place={"name": name, "radius_m": radius})
+            data["place_id"], data["name"], data["new_place"] = pid, name, True
+        if data.get("status") == "pending":
+            data["say"] = ("Saved %s here, waiting for your approval in the hub." % data["name"] if data["new_place"]
+                           else "Saved the new pin for %s, waiting for your approval in the hub." % data["name"])
+        else:
+            data["say"] = "Pinned %s here." % data["name"]
+        return data
+
+
+def _pin_parts(coords):
+    pin = _coerce(_place_spec("place.x.pin", "x", "pin"), coords)
+    return pin["lat"], pin["lng"]
+
+
+def pin_place_tool(coords: Union[str, dict], place: str | None = None, name: str | None = None,
+                   radius_m: int | None = None) -> dict:
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    try:
+        data = pin_place_sync(coords, place=place, name=name, radius_m=radius_m, door="app")
+        pending = data.get("status") == "pending"
+        return ok_reply("pending" if pending else "change", data, ref=data.get("change_id"),
+                        message=PENDING_MESSAGE if pending else None, fallback_text=data.get("say"))
+    except SettingsError as e:
+        return _settings_fail(e)
+    except Exception as e:  # noqa: BLE001
+        return fail("internal", repr(e), "places")
+
+
+pin_place = tool(pin_place_tool)
 
 
 def _arrival_day(t_s, now=None):
@@ -1572,8 +1982,14 @@ def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=
             t_s = rp.to_epoch(time, "time")
         title = title or ""
         is_test = str(title).strip().lower() == "test"
+        last = None if (replay or is_test) else _load_last_arrival()
+        if not (replay or is_test):
+            ignored = _ignored_arrival(place, coords, title, t_s, now_s, last, ride_out)
+            if ignored:
+                return ignored
+        custom = bool(place) and place not in rp.PLACES and place != "gymday"
         events = []
-        if not is_test:
+        if not is_test and not custom:
             day = _arrival_day(t_s, now=now)
             events = gcal.events_for_plan(day, day, before=1, after=1, now=now)
         inp = {"time": t_s, "now": now_s, "title": title, "events": events}
@@ -1581,11 +1997,15 @@ def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=
             inp["place"] = place
         if coords not in (None, ""):
             inp["coords"] = coords
+        last_t = _arrival_time(last)
+        if last and last.get("place") == "farm" and last_t is not None and last_t <= t_s \
+                and rp.day_key(last_t) == rp.day_key(t_s):
+            inp["farm_done"] = True
         ensure_store(now=now)
         day = _arrival_day(t_s, now=now)
         with planner_swap(day=day, now=now):
             out = rp.cmd_arrival(inp)
-        if not replay:
+        if not replay and not is_test:  # a plumbing test is not where Jordan is
             con = rp.db_open()
             try:
                 rec = {
@@ -1620,6 +2040,55 @@ def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=
         return fail(e.code, str(e), step, data=dict(e.extra) if e.extra else {}, ref=ref)
     except Exception as e:  # noqa: BLE001
         return fail("internal", repr(e), "planner", ref=ref)
+
+
+def _arrival_time(rec):
+    try:
+        return rp.to_epoch(rec.get("time"), "time") if rec and rec.get("time") else None
+    except rp.RiviaError:
+        return None
+
+
+def _ignored_arrival(place, coords, title, t_s, now_s, last, ride_out):
+    """A queued arrival the phone flushed late, a repeat, or one older than the last arrival:
+    reply quietly (say=False, alerts null) instead of planning. None means plan as usual."""
+    try:
+        pid = place or rp.place_of(coords, title)
+    except rp.RiviaError:
+        pid = place
+    pid = rp.gym_for_place(pid, t_s) if pid else None
+    last_t = _arrival_time(last)
+    reason = None
+    if last_t is not None:
+        if pid and pid == last.get("place") and abs(t_s - last_t) <= DUP_ARRIVAL_S:
+            reason = "duplicate"
+        elif t_s < last_t:
+            reason = "older"
+    late_m = max(0, (now_s - t_s) // 60)
+    if reason is None:
+        con = rp.db_open()
+        try:
+            ensure_settings_schema(con)
+            cutoff = _resolved(con, "arrival_late_minutes")[0]
+            if now_s - t_s > int(cutoff) * 60:
+                reason = "late"
+                rec = {"place": pid, "title": title, "time": rp.iso(t_s), "ignored": "late"}
+                if coords not in (None, ""):
+                    rec["coords"] = coords
+                _save_last_arrival(con, rec)  # still the newest arrival: later repeats match it
+        finally:
+            con.close()
+    if reason is None:
+        return None
+    print("rivia: arrival ignored (%s%s): %s @ %s" % (
+        reason, " %d min" % late_m if reason == "late" else "", pid or title or "?", rp.time_of_day(t_s)),
+        file=sys.stderr)
+    place_fact = rp.pfact(pid) if pid in rp.PLACES else {"id": pid, "name": pid}
+    data = {"place": pid, "arrived": rp.when(t_s), "ignored": reason, "late_minutes": late_m}
+    if ride_out is not None:
+        data["ride"] = ride_out
+    msg = rp.message("arrival_ignored", {"place": place_fact, "ignored": reason, "late_minutes": late_m}, [], say=False)
+    return ok_reply("arrival", data, message=msg, alerts=None, fallback_text="")
 
 
 def replay_last_arrival(now=None):
@@ -1689,16 +2158,16 @@ log_ride = tool(log_ride_tool)
 
 def cmd_pin(place, lat, lng):
     """Store a standing place.<id>.pin through the normal setting checks. Termux only."""
-    place = str(place or "").strip()
-    if place not in rp.PLACES:
-        raise SettingsError(
-            "bad_place",
-            "Unknown place: %s. Use home, farm, gym, pf, or hmc." % (place or "(none)",),
-            step="input",
-        )
-    data = change_setting_sync(
-        "place.%s.pin" % place, {"lat": lat, "lng": lng}, "standing", door="termux",
-    )
+    with _con() as con:
+        pid = _resolve_place_id(con, place)
+        if not pid:
+            raise SettingsError(
+                "bad_place",
+                "Unknown place: %s. Use home, farm, gym, pf, hmc, or one of yours (rivia sched places); "
+                "add one with rivia sched add-place." % (str(place or "").strip() or "(none)",),
+                step="input",
+            )
+        data = _change_setting(con, "place.%s.pin" % pid, {"lat": lat, "lng": lng}, "standing", door="termux")
     return {"ok": True, **data}
 
 
@@ -2284,6 +2753,15 @@ ACTIONS = {
         "time_bearing": False,
         "description": LOG_RIDE_DESCRIPTION,
     },
+    "sched.pin_place": {
+        "fn": pin_place,
+        "lockable": (),
+        "py_params": {"coords": "coords", "place": "place", "name": "name", "radius_m": "radius_m"},
+        "doors": ("app",),
+        "kind": "change",
+        "time_bearing": False,
+        "description": PIN_PLACE_DESCRIPTION,
+    },
     "sched.write_day": {
         "fn": write_day,
         "lockable": ("day",),
@@ -2307,8 +2785,9 @@ def _load_change(con, change_id):
     return row
 
 
-def _rerun_checks(con, key, coerced, scope, day_s):
+def _rerun_checks(con, key, coerced, scope, day_s, more=None):
     extra = {key: coerced}
+    extra.update(more or {})
     resolved = _all_resolved(con, day=day_s, extra=extra)
     problems = _consistency_problems(resolved)
     if problems:
@@ -2349,9 +2828,24 @@ def approve_change_sync(change_id, now=None, con=None):
         if kind == "write_day" or key == "write_day":
             return _approve_write_day(con, row, now, now_s)
         coerced = _load_value(new_s)
-        _rerun_checks(con, key, coerced, scope, day_s)
+        try:
+            pv = json.loads(preview) if preview else {}
+        except ValueError:
+            pv = {}
+        new_place = pv.get("new_place") if isinstance(pv, dict) else None
+        more = {}
+        if isinstance(new_place, dict) and key.startswith("place."):
+            pid = key.split(".")[1]
+            more = {"place.%s.%s" % (pid, f): new_place[f] for f in ("name", "radius_m") if new_place.get(f) is not None}
+            more["place.%s.status" % pid] = "active"
+        _rerun_checks(con, key, coerced, scope, day_s, more=more)
         value_s = new_s
         created_s = rp.iso(now_s)
+        for k, v in more.items():  # a new place from the app: its name (and size) come with the pin
+            con.execute(
+                "insert or replace into settings(key, value, updated, change_id) values(?,?,?,?)",
+                (k, _store_value(v), created_s, cid),
+            )
         if scope == "standing":
             con.execute(
                 "insert or replace into settings(key, value, updated, change_id) values(?,?,?,?)",
@@ -2372,7 +2866,7 @@ def approve_change_sync(change_id, now=None, con=None):
         data["reason"] = reason
         data["approved"] = True
         spec = _parse_key(key)
-        if spec["family"] == "place" and spec.get("field") == "pin":
+        if spec["family"] == "place":
             data["places_file"] = rewrite_places_file(con)
         return data
     finally:
@@ -2503,7 +2997,7 @@ def main(argv=None):
     argv = list(_sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "settings"
     if cmd in ("-h", "--help"):
-        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh")
+        print("rivia_sched.py settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | places | seed-places | add-place <name> <lat> <lng> [meters] | rename-place <place> <name> | remove-place <place> | zone <place> <meters|bigger|smaller> | exclude-ride <ride_id> <reason> | include-ride <ride_id> | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh")
         return 2
     try:
         # restore / rides / start-fresh are Termux recovery commands; they must
@@ -2522,6 +3016,13 @@ def main(argv=None):
             out = cmd_start_fresh()
             print(json.dumps(out, indent=1))
             return 0
+        if cmd in ("exclude-ride", "include-ride"):
+            if len(argv) < (3 if cmd == "exclude-ride" else 2):
+                print('usage: rivia sched exclude-ride <ride_id> "<reason>" | include-ride <ride_id>', file=_sys.stderr)
+                return 2
+            out = rp.exclude_ride(argv[1], " ".join(argv[2:])) if cmd == "exclude-ride" else rp.include_ride(argv[1])
+            print(json.dumps({"ok": True, **out}, indent=1))
+            return 0
         if not selftest_ok():
             print(json.dumps({"ok": False, "error": {"code": "selftest_failed", "msg": "planner selftest failed", "step": "planner"}}, indent=1))
             return 1
@@ -2531,6 +3032,23 @@ def main(argv=None):
                 return 2
             out = cmd_pin(argv[1], argv[2], argv[3])
             print(json.dumps(out, indent=1))
+            return 0
+        usage = {"add-place": (4, "add-place <name> <lat> <lng> [meters]"), "rename-place": (3, "rename-place <place> <name>"),
+                 "remove-place": (2, "remove-place <place>"), "zone": (3, "zone <place> <meters|bigger|smaller>")}
+        if cmd in usage and len(argv) < usage[cmd][0]:
+            print("usage: rivia sched %s" % usage[cmd][1], file=_sys.stderr)
+            return 2
+        place_cmds = {
+            "places": lambda: list_places(),
+            "seed-places": lambda: seed_places(),
+            "add-place": lambda: add_place(argv[1], argv[2], argv[3], argv[4] if len(argv) > 4 else None),
+            "rename-place": lambda: rename_place(argv[1], " ".join(argv[2:])),
+            "remove-place": lambda: remove_place(argv[1]),
+            "zone": lambda: set_zone(argv[1], argv[2]),
+        }
+        if cmd in place_cmds:
+            out = place_cmds[cmd]()
+            print(json.dumps({"ok": True, **out}, indent=1))
             return 0
         if cmd == "call":
             if len(argv) < 2:
@@ -2578,7 +3096,7 @@ def main(argv=None):
             out = cmd_evening_refresh()
             print(json.dumps(out, indent=1))
             return 0
-        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, call, approve, reject, morning-tick, or evening-refresh)" % cmd, file=_sys.stderr)
+        print("unknown command: %s (use settings, settings-log, rides, restore <file>, start-fresh, pin, places, seed-places, add-place, rename-place, remove-place, zone, exclude-ride, include-ride, call, approve, reject, morning-tick, or evening-refresh)" % cmd, file=_sys.stderr)
         return 2
     except SettingsError as e:
         print(json.dumps({"ok": False, "error": {"code": e.code, "msg": str(e), "step": e.step}}, indent=1))

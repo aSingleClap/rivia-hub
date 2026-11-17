@@ -276,18 +276,54 @@ def run():
         return '' if ok else 'facts were ' + json.dumps(f)
     check('late at the gym: facts carry the cut and the leave time', t_cut_facts)
 
+    # JOB-007: home before a shift names the next stop that still fits.
+    def t_home_next():
+        probs = []
+        for mins, stop, leave, tag, words in [(300, 'farm', 252, 'leave-farm', 'Next stop the farm; leave by'),
+                                              (200, 'gym', 184, 'leave-gym', 'Next stop the gym; leave by'),
+                                              (100, 'hmc', 30, 'leave-work', 'Leave for work at')]:
+            p = plan('home', at(mins))
+            m = p['message']
+            f = m['facts']
+            if m['situation'] != 'home_before_shift' or f['next_stop']['id'] != stop or \
+                    f['leave_at']['epoch'] != at(leave) or not {'next_stop', 'leave_at'} <= set(m['must_say']):
+                probs.append('%d min before: %s' % (mins, json.dumps({k: f[k] for k in ('next_stop', 'leave_at')})))
+            elif not (p['speak'] == 'Home. %s %s.' % (words, clock(at(leave)))):
+                probs.append('%d min before: speak was %s' % (mins, p['speak']))
+            elif one(p, tag, at(leave) - 300):
+                probs.append('%d min before: %s' % (mins, one(p, tag, at(leave) - 300)))
+            elif 'leave_for_work_at' not in f or any(k not in f for k in m['must_say']):
+                probs.append('%d min before: facts missing' % mins)
+        return ' '.join(probs)
+    check('home before a shift: farm, then gym, then work, each with its leave time', t_home_next)
+
+    def t_home_farm_done():
+        p = plan_arrival('home', at(300), '', leg, at(300), shift=shift, farm_done=True)
+        f = p['message']['facts']
+        return '' if f['next_stop']['id'] == 'gym' and f['leave_at']['epoch'] == at(184) else 'got ' + p['speak']
+    check('home with the farm already done today: the gym is next', t_home_farm_done)
+
+    def t_home_no_gym_leg():
+        lg = Legs({}, [])  # your estimates only: no home-gym time yet
+        p = plan_arrival('home', at(200), '', lg, at(200), shift=shift)
+        f = p['message']['facts']
+        ok = f['next_stop']['id'] == 'hmc' and not lg.missing
+        return '' if ok else 'next %s, missing %s' % (f['next_stop']['id'], lg.missing)
+    check('home with no home-gym ride time: work is next, no Maps request', t_home_no_gym_leg)
+
     # ── The ride database (scheduler.db) and its Drive copy ─────────────
     # Each check gets its own empty folder in place of ~/rivia.
 
     def in_tmp(fn):
         def inner():
-            old = rp.RIVIA_DIR
+            old, old_places = rp.RIVIA_DIR, rp.PLACES_FILE
             d = tempfile.mkdtemp()
             rp.RIVIA_DIR = d
+            rp.PLACES_FILE = os.path.join(d, 'places.json')  # never the real pins
             try:
                 return fn(d)
             finally:
-                rp.RIVIA_DIR = old
+                rp.RIVIA_DIR, rp.PLACES_FILE = old, old_places
                 shutil.rmtree(d, ignore_errors=True)
         return inner
 
@@ -295,6 +331,13 @@ def run():
         s = to_epoch(start)
         return {'ride_id': rid, 'from': frm, 'to': to, 'departed': s, 'arrived': s + minutes * 60,
                 'distance_km': 8.1, 'avg_kmh': 25.6, 'polyline': 'abc'}
+
+    def get_meta_value(key):
+        con = db_open()
+        try:
+            return get_meta(con, key)
+        finally:
+            con.close()
 
     def code_of(fn, *args):
         try:
@@ -382,6 +425,86 @@ def run():
         finally:
             shutil.rmtree(keep, ignore_errors=True)
     check('restore merges the Drive copy into a reset computer and never drops rides', in_tmp(t_restore))
+
+    # JOB-007: places, zone sizes, ride checks. Made-up pins, about 2.3 km home to farm.
+    HOME = {'lat': 40.2000, 'lng': -76.7200}
+    TEST_PLACES = {
+        'home': dict(HOME, name='home', radius_m=60),
+        'farm': {'lat': 40.2207, 'lng': -76.7200, 'name': 'the farm'},
+        'giant': {'lat': 40.2018, 'lng': -76.7200, 'name': 'Giant', 'radius_m': 100, 'custom': True},
+        'oldspot': {'lat': 40.2100, 'lng': -76.7000, 'name': 'Old Spot', 'custom': True, 'removed': True},
+        'bad id': {'lat': 40.3, 'lng': -76.7, 'custom': True},
+    }
+
+    def with_places(d):
+        with open(os.path.join(d, 'places.json'), 'w') as f:
+            json.dump(TEST_PLACES, f)
+
+    def t_place_zones(d):
+        with_places(d)
+        near = {'lat': HOME['lat'] + 0.00036, 'lng': HOME['lng']}   # ~40 m
+        out = {'lat': HOME['lat'] + 0.00090, 'lng': HOME['lng']}    # ~100 m: past home's 60 m
+        at_giant = '%s,%s' % (TEST_PLACES['giant']['lat'], TEST_PLACES['giant']['lng'])
+        got = [place_of(near, ''), place_of(out, ''), place_of(at_giant, ''),
+               place_of('40.2100,-76.7000', ''), ','.join(sorted(place_pins()))]
+        want = ['home', None, 'giant', None, 'farm,giant,home']
+        return '' if got == want else 'got %s' % got
+    check('positions match each place by its own zone size; removed places never match', in_tmp(t_place_zones))
+
+    def t_custom_arrival(d):
+        with_places(d)
+        t = to_epoch('2026-11-16T12:00:00-05:00')
+        a = cmd_arrival({'place': 'giant', 'time': t, 'now': t, 'events': []})
+        b = cmd_arrival({'place': 'oldspot', 'time': t, 'now': t, 'events': []})
+        ok = (a['place'] == 'giant' and a['alerts'] is None and a['fallback_text'] == 'Arrived at Giant.' and
+              a['message']['situation'] == 'arrived_unknown' and a['message']['facts']['place'] == {'id': 'giant', 'name': 'Giant'} and
+              b['fallback_text'] == 'Arrived at Old Spot.' and code_of(cmd_arrival, {'place': 'moon', 'time': t, 'now': t}) == 'bad_place')
+        return '' if ok else 'got %s / %s' % (a, b['fallback_text'])
+    check('arriving at a custom place says its name and keeps the alerts', in_tmp(t_custom_arrival))
+
+    def t_ride_checks(d):
+        with_places(d)
+        cmd_init_db({})
+        fast = cmd_log_ride(ride('h1', 'home', 'farm', minutes=2))
+        fine = cmd_log_ride(ride('h2', 'home', 'farm', start='2026-11-10T09:00:00-05:00', minutes=8))
+        cust = cmd_log_ride(ride('c1', 'home', 'giant', start='2026-11-11T09:00:00-05:00', minutes=4))
+        moon = code_of(cmd_log_ride, ride('m1', 'home', 'moon'))
+        ok = (fast['stored'] and not fast['used'] and fast['note'].startswith('Too fast: 2.3 km') and
+              fine['used'] and cust['stored'] and not cust['used'] and cust['note'].startswith('A custom place') and
+              moon == 'bad_place')
+        return '' if ok else 'fast=%s fine=%s cust=%s moon=%s' % (fast, fine, cust, moon)
+    check('an impossible ride or a custom-place ride is stored but not learned from', in_tmp(t_ride_checks))
+
+    def t_half_usual(d):
+        cmd_init_db({})
+        first = cmd_log_ride(ride('g0', 'gym', 'hmc', minutes=2.2))  # vs your 5-min estimate: still learned
+        for i in range(3):
+            cmd_log_ride(ride('g%d' % (i + 1), 'gym', 'hmc', start='2026-11-1%dT09:00:00-05:00' % i, minutes=6))
+        late = cmd_log_ride(ride('g9', 'gym', 'hmc', start='2026-11-14T09:00:00-05:00', minutes=2.2))
+        ok = first['used'] and not late['used'] and late['note'].startswith('Under 0.5x the usual 6 min')
+        return '' if ok else 'first=%s late=%s' % (first, late)
+    check('under half the usual is checked only against learned rides', in_tmp(t_half_usual))
+
+    def t_exclude(d):
+        cmd_init_db({})
+        for i, m in enumerate([18, 19, 17]):
+            cmd_log_ride(ride('r%d' % i, start='2026-11-%02dT09:00:00-05:00' % (10 + i), minutes=m))
+        before = Legs({}).info('farm', 'gym')
+        change = get_meta_value('change')
+        ex = exclude_ride('r1', '  geofence fired late ')
+        again = exclude_ride('r1', 'twice')
+        mid = Legs({}).info('farm', 'gym')
+        noted = [r for r in load_rides() if r['ride_id'] == 'r1'][0]
+        back = include_ride('r1')
+        after = Legs({}).info('farm', 'gym')
+        restored = [r for r in load_rides() if r['ride_id'] == 'r1'][0]
+        ok = (before == (19, 'learned from 3 rides') and ex['changed'] and not again['changed'] and
+              mid == (20, 'your estimate') and noted['note'] == 'excluded: geofence fired late' and not noted['used'] and
+              after == before and restored['used'] and restored['note'] == '' and back['changed'] and
+              int(get_meta_value('change')) == int(change) + 2 and code_of(include_ride, 'r1') == 'not_excluded' and
+              code_of(exclude_ride, 'nope', 'x') == 'no_ride' and len(load_rides()) == 3)
+        return '' if ok else 'before=%s mid=%s after=%s noted=%s restored=%s' % (before, mid, after, noted, restored)
+    check('excluding a ride stops learning from it; including it puts it back exactly', in_tmp(t_exclude))
 
     passed = sum(1 for _, n in results if not n)
     lines = [('PASS  ' if not n else 'FAIL  ') + name + ('' if not n else '  (' + n + ')') for name, n in results]

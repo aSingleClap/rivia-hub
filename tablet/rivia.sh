@@ -22,7 +22,15 @@
 #   rivia sched rides          ride count in scheduler.db
 #   rivia sched restore <file>  merge rides from a Drive copy (scheduler.db or scheduler.json); never drops any
 #   rivia sched backup         upload scheduler.db to Drive (same file each time); --force to push anyway
-#   rivia sched pin <place> <lat> <lng>  store a place pin (Termux); refuses a pin closer than 2× the geofence radius
+#   rivia sched pin <place> <lat> <lng>  store a place pin (Termux); refuses pins whose zones would overlap
+#   rivia sched places         every place: name, pin, zone size, core or custom, removed
+#   rivia sched seed-places    store the core places' names (and pins) in the settings store; safe to re-run
+#   rivia sched add-place "<name>" <lat> <lng> [meters]  add one of your own places (e.g. Giant)
+#   rivia sched rename-place <place> "<name>"   change a place's spoken name
+#   rivia sched remove-place <place>   remove one of your own places (core places can't be removed)
+#   rivia sched zone <place> <meters|bigger|smaller>   set a place's zone size (50-400 m)
+#   rivia sched exclude-ride <ride_id> "<reason>"   stop learning from a bad ride (never deletes it)
+#   rivia sched include-ride <ride_id>   undo exclude-ride
 #   rivia sched call <tool> [json]  call an app-door tool locally (no phone)
 #   rivia sched approve <id>  approve a pending standing change
 #   rivia sched reject <id>   reject a pending standing change
@@ -259,6 +267,10 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py pin "$2" "$3" "$4"
             ;;
+        places|seed-places|add-place|rename-place|remove-place|zone|exclude-ride|include-ride)
+            sched_code_and_python
+            "$py" rivia_sched.py "$@"
+            ;;
         call)
             [ -n "${2:-}" ] || die 'usage: rivia sched call <tool> [json]'
             sched_code_and_python
@@ -284,7 +296,7 @@ sched() {
             sched_code_and_python
             "$py" rivia_sched.py evening-refresh
             ;;
-        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh' ;;
+        *) die 'usage: rivia sched selftest | google-login | events <day> | signin-check | backup | settings [day] | settings-log | rides | restore <file> | start-fresh | pin <place> <lat> <lng> | places | seed-places | add-place | rename-place | remove-place | zone | exclude-ride | include-ride | call <tool> [json] | approve <id> | reject <id> | morning-tick | evening-refresh' ;;
     esac
 }
 
@@ -364,5 +376,5 @@ while True:
     time.sleep(5)
 PYEOF
              ;;
-    *)       sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

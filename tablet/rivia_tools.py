@@ -44,7 +44,27 @@ SEED = (
      "preset": {}, "description": sched.LOG_RIDE_DESCRIPTION, "model": 0, "enabled": 1},
     {"name": "write_day", "door": "app", "action": "sched.write_day",
      "preset": {}, "description": sched.WRITE_DAY_DESCRIPTION, "model": 1, "enabled": 1},
+    {"name": "app_pin_place", "door": "app", "action": "sched.pin_place",
+     "preset": {}, "description": sched.PIN_PLACE_DESCRIPTION, "model": 0, "enabled": 1},
 )
+
+# Seeded descriptions that a later version rewrote. A stored row still holding one of these
+# exact texts was never edited by hand, so seed_tools updates it to the current text.
+OLD_DESCRIPTIONS = {
+    "change_schedule_setting": (
+        "Change one of Jordan's schedule settings. scope is day (that date only, today "
+        "through 14 days ahead) or standing. A standing change from this door is not "
+        "applied until it is approved; the reply is pending. A pending result has not "
+        "happened yet. Out-of-range or inconsistent values are refused with the reason.",
+        "Change one of Jordan's schedule settings. scope is day (that date only, today "
+        "through 14 days ahead) or standing. A standing change from this door is not "
+        "applied. Out-of-range or inconsistent values are refused with the reason.",
+    ),
+    "undo_schedule_change": (
+        "Undo a schedule setting change. With no change_id, undo the latest change made "
+        "through this door in the last 24 hours. Restores the old value and logs a new change.",
+    ),
+}
 
 _installed: set[str] = set()
 
@@ -76,6 +96,11 @@ def seed_tools(con):
             (row["name"], row["door"], row["action"], json.dumps(row["preset"], separators=(",", ":")),
              row["description"], 1 if row["model"] else 0, 1 if row["enabled"] else 0, now),
         )
+        for old_text in OLD_DESCRIPTIONS.get(row["name"], ()):
+            con.execute(
+                "update tools set description=?, updated=? where door=? and name=? and description=?",
+                (row["description"], now, row["door"], row["name"], old_text),
+            )
 
 
 def open_db():

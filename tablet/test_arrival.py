@@ -3,7 +3,7 @@ Throwaway RIVIA_DIR / tokens; never touches ~/rivia or ~/.rivia.
     python test_arrival.py
 """
 import base64, hashlib, json, os, secrets, subprocess, sys, tempfile, threading, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -284,6 +284,93 @@ data, alerts, _msg = sched.maybe_refresh_alerts(broke, now=NOW)
 ok(broke["value"] == 40, "the change stands when the rerun fails")
 ok(alerts is None and data.get("alerts_refresh") == "failed",
    "a failed rerun returns alerts null and data.alerts_refresh=failed")
+
+# ══ JOB-007 ══
+def at(hh, mm, ss=0):
+    return datetime(2026, 11, 16, hh, mm, ss, tzinfo=gcal.TZ)
+
+
+# ── home after the farm: the gym is next (ride_estimate.gym_home = 25) ──
+sched.change_setting_sync("ride_estimate.gym_home", 25, "standing", door="termux", now=NOW)
+home = sched.arrival_sync(place="home", time="2026-11-16T09:30:00-05:00", now=at(9, 30))
+f = (home.get("message") or {}).get("facts") or {}
+ok(home["ok"] and f.get("next_stop", {}).get("id") == "gym" and f["leave_at"]["spoken"] == "11:20",
+   "home after the farm ride: next stop the gym, leave by 11:20 (%s)" % home.get("fallback_text"))
+ok(home["fallback_text"] == "Home. Next stop the gym; leave by 11:20." and home["alerts"]
+   and home["alerts"][0]["id"].startswith("leave-gym"), "the leave-by alert is for the gym")
+
+# ── Nov 16 replay: 4 queued farm arrivals flushed 10 s apart, 25 min late ──
+plans = []
+real_cmd_arrival = rp.cmd_arrival
+
+
+def counting(inp):
+    plans.append(inp)
+    return real_cmd_arrival(inp)
+
+
+rp.cmd_arrival = counting
+try:
+    burst = [sched.arrival_sync(place="farm", time=t, now=at(11, 26, 51) + timedelta(seconds=dt))
+             for dt, t in ((0, "2026-11-16T11:01:00-05:00"), (1, "2026-11-16T11:01:20-05:00"),
+                           (5, "2026-11-16T11:01:40-05:00"), (10, "2026-11-16T11:02:00-05:00"))]
+    ok(all(b["ok"] for b in burst), "every queued arrival still answers ok")
+    ok(len(plans) <= 1, "the burst makes at most one plan (made %d)" % len(plans))
+    ok(all(b["alerts"] is None for b in burst), "the burst leaves the alerts alone (alerts null)")
+    ok(all(b["message"]["delivery"]["say"] is False and b["fallback_text"] == "" for b in burst),
+       "the burst says nothing")
+    ok([b["data"]["ignored"] for b in burst] == ["late", "duplicate", "duplicate", "duplicate"],
+       "the first is late (25 min), the rest are repeats: %s" % [b["data"]["ignored"] for b in burst])
+    ok(burst[0]["data"]["late_minutes"] == 25, "late_minutes is 25")
+    last = sched._load_last_arrival()
+    ok(last["place"] == "farm" and last["time"] == "2026-11-16T11:01:00-05:00",
+       "the late arrival is still the newest one on record")
+    older = sched.arrival_sync(place="gym", time="2026-11-16T10:50:00-05:00", now=at(11, 27, 30))
+    ok(older["data"].get("ignored") == "older" and older["alerts"] is None, "an out-of-order older arrival is ignored")
+    fresh = sched.arrival_sync(place="gym", time="2026-11-16T11:44:00-05:00", now=at(11, 44, 8))
+    ok(fresh["ok"] and "ignored" not in fresh["data"] and fresh["message"]["delivery"]["say"] is True
+       and isinstance(fresh["alerts"], list) and fresh["alerts"], "a fresh on-time arrival still speaks and sets alerts")
+    ok(len(plans) == 1, "only the fresh arrival was planned")
+    sched.change_setting_sync("arrival_late_minutes", 30, "standing", door="termux", now=NOW)
+    work = sched.arrival_sync(place="hmc", time="2026-11-16T12:20:00-05:00", now=at(12, 45))
+    ok("ignored" not in work["data"] and work["alerts"] == [] and len(plans) == 2,
+       "arrival_late_minutes is a setting: at 30, a 25-minute-late arrival is planned")
+    sched.change_setting_sync("arrival_late_minutes", 10, "standing", door="termux", now=NOW)
+finally:
+    rp.cmd_arrival = real_cmd_arrival
+
+# ── a custom place: named on arrival, keeps the alerts; its rides are kept, not learned ──
+sched.add_place("Giant", 40.2018, -76.7200)
+g = sched.arrival_sync(place="giant", time="2026-11-16T13:00:00-05:00", now=at(13, 0, 5))
+ok(g["ok"] and g["data"]["place"] == "giant" and g["fallback_text"] == "Arrived at Giant." and g["alerts"] is None,
+   "arriving at Giant says Giant and keeps the alerts")
+g2 = sched.arrival_sync(place="giant", time="2026-11-16T13:40:00-05:00", now=at(13, 40, 5), ride={
+    "ride_id": "ride-giant-1", "from": "hmc", "to": "giant",
+    "departed": "2026-11-16T13:30:00-05:00", "arrived": "2026-11-16T13:40:00-05:00"})
+gr = g2["data"].get("ride") or {}
+ok(g2["ok"] and gr.get("stored") is True and gr.get("used") is False and gr["note"].startswith("A custom place"),
+   "a ride to Giant is stored but not learned from")
+n_rides = sched.cmd_rides()["rides"]
+sched.remove_place("giant")
+g3 = sched.arrival_sync(place="giant", time="2026-11-16T14:30:00-05:00", now=at(14, 30, 5))
+ok(g3["ok"] and g3["fallback_text"] == "Arrived at Giant." and sched.cmd_rides()["rides"] == n_rides,
+   "a removed place is still named (the phone may lag a day) and its rides stay")
+
+# ── exclude-ride / include-ride (Termux) ──
+orig = [r for r in rp.load_rides() if r["ride_id"] == RIDE["ride_id"]][0]
+ex = sh_sched("exclude-ride", RIDE["ride_id"], "test: geofence fired late")
+exo = json.loads(ex.stdout)
+ok(ex.returncode == 0 and exo["ok"] and exo["used"] is False and exo["note"] == "excluded: test: geofence fired late",
+   "rivia sched exclude-ride marks the ride, never deletes it")
+mid = [r for r in rp.load_rides() if r["ride_id"] == RIDE["ride_id"]][0]
+ok(mid["used"] is False and mid["note"].startswith("excluded:") and sched.cmd_rides()["rides"] == n_rides,
+   "the ride is still stored, now not learned from")
+inc = sh_sched("include-ride", RIDE["ride_id"])
+back = [r for r in rp.load_rides() if r["ride_id"] == RIDE["ride_id"]][0]
+ok(inc.returncode == 0 and back["used"] == orig["used"] and back["note"] == orig["note"],
+   "rivia sched include-ride puts the ride back exactly as it was")
+usage = sh_sched("exclude-ride", RIDE["ride_id"])
+ok(usage.returncode != 0 and "usage" in (usage.stderr or "").lower(), "exclude-ride needs a reason")
 
 # Did not touch the box home database
 ok(os.path.abspath(rp.db_file()).startswith(os.path.abspath(TMP)),

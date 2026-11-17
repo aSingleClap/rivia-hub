@@ -127,14 +127,12 @@ close_out = json.loads(cli_close.stdout)
 ok(close_out["ok"] is False and close_out["error"]["code"] == "inconsistent",
    "rivia sched pin reports inconsistent for a too-close pin")
 
-# ── app door cannot set a pin ──
-try:
-    sched.change_setting_sync("place.farm.pin", PINS["farm"], "standing", door="app")
-    app_err = None
-except sched.SettingsError as e:
-    app_err = e
-ok(app_err is not None and app_err.code == "bad_key",
-   "the app door cannot change a place pin")
+# ── an app-door pin waits for approval (G7); the pin does not move yet ──
+app_pin = sched.change_setting_sync("place.farm.pin", {"lat": 40.1925, "lng": -76.7100}, "standing", door="app")
+ok(app_pin["status"] == "pending", "an app-door pin waits for approval")
+ok(sched.places_sync()["places"][0]["id"] == "farm" and sched.places_sync()["places"][0]["lat"] == PINS["farm"]["lat"],
+   "a pending pin does not move the place")
+sched.reject_change_sync(app_pin["change_id"])
 
 # ── unknown place / usage ──
 try:
@@ -184,6 +182,199 @@ ok(near_err is not None and near_err.code == "inconsistent",
 # restore default radius
 sched.change_setting_sync("geofence_radius_meters", 150, "standing", door="termux")
 ok(sched.places_sync()["radius_m"] == 150, "radius can be set back to 150")
+
+# ══ JOB-007: per-place zone sizes, voice resize with undo, places in the settings store ══
+def changes(key=None):
+    con = rp.db_open()
+    try:
+        q = "select change_id, door, key, old, new, status, reason from changes"
+        rows = list(con.execute(q + (" where key=?" if key else "") + " order by rowid", (key,) if key else ()))
+        return rows
+    finally:
+        con.close()
+
+
+def zones():
+    return {p["id"]: p["radius_m"] for p in sched.places_sync()["places"]}
+
+
+def change(key, value):
+    return sched.cmd_call("change_schedule_setting", json.dumps({"key": key, "scope": "standing", "value": value}))
+
+
+def undo():
+    return sched.cmd_call("undo_schedule_change", "{}")
+
+
+# ── Fix 1: each place has its own zone size; unset means the default 150 m ──
+ok(zones() == dict.fromkeys(PINS, 150) and not any(p["custom"] for p in sched.places_sync()["places"]),
+   "every place starts at the default 150 m zone")
+home60 = sched.set_zone("home", 60)
+ok(home60["value"] == 60 and home60["status"] == "applied", "Termux sets home's zone to 60 m")
+ok(zones() == {"home": 60, "farm": 150, "gym": 150, "hmc": 150, "pf": 150},
+   "app_places: home 60 m, the other four 150 m")
+ok(sched.places_sync()["radius_m"] == 150, "the top-level radius_m stays the default, for old clients")
+cli_pl = json.loads(sh_sched("call", "app_places", "{}").stdout)
+ok({p["id"]: p["radius_m"] for p in cli_pl["data"]["places"]} == zones(),
+   "rivia sched call app_places shows the same per-place sizes")
+disk = json.load(open(path))
+ok(disk["home"].get("radius_m") == 60 and "radius_m" not in disk["farm"], "places.json carries home's own size")
+ok(rp.place_of({"lat": PINS["home"]["lat"] + 0.0009, "lng": PINS["home"]["lng"]}, "") is None,
+   "a position 100 m from the home pin is not home any more")
+ok(rp.place_of({"lat": PINS["home"]["lat"] + 0.0004, "lng": PINS["home"]["lng"]}, "") == "home",
+   "a position 45 m from the home pin is home")
+
+# zones may not overlap: pins at least radius_a + radius_b apart (60 + 150 = 210 m)
+near_home = {"lat": PINS["home"]["lat"] + 0.001619, "lng": PINS["home"]["lng"]}   # ~180 m north
+giant_pin = {"lat": PINS["home"]["lat"] + 0.001979, "lng": PINS["home"]["lng"]}   # ~220 m north
+ok(175 < rp.meters_between(PINS["home"], near_home) < 185 and 215 < rp.meters_between(PINS["home"], giant_pin) < 225,
+   "test pins are about 180 m and 220 m from home")
+try:
+    sched.add_place("Giant", near_home["lat"], near_home["lng"])
+    close_err = None
+except sched.SettingsError as e:
+    close_err = e
+ok(close_err is not None and close_err.code == "inconsistent" and "210" in str(close_err),
+   "a place 180 m from a 60 m home is refused (zones 150 + 60 would overlap)")
+ok("giant" not in json.load(open(path)) and not [p for p in sched.list_places()["places"] if p["id"] == "giant"],
+   "a refused place writes nothing")
+
+# ── Fix 3: seed, add, rename, re-pin, remove ──
+seed1 = sched.seed_places()
+ok(len(seed1["seeded"]) == 5 and all(x["key"].endswith(".name") for x in seed1["seeded"]),
+   "the first seed stores the five core names (their pins are already stored)")
+n_before = len(changes())
+seed2 = sched.seed_places()
+ok(seed2["seeded"] == [] and len(changes()) == n_before, "a second seed changes nothing")
+ok(all(r[1] == "system" and r[6] == "job-007 places seed" for r in changes() if r[6] == "job-007 places seed"),
+   "the seed is logged as a system change")
+
+added = sched.add_place("Giant", giant_pin["lat"], giant_pin["lng"])
+ok(added["added"] == "giant" and added["place"]["radius_m"] == 150 and added["place"]["core"] is False,
+   "Giant is added 220 m from home with the default 150 m zone")
+items = {p["id"]: p for p in sched.places_sync()["places"]}
+ok("giant" in items and items["giant"]["spoken_name"] == "Giant" and items["giant"]["custom"] is True
+   and items["giant"]["radius_m"] == 150, "app_places lists Giant as a custom place")
+ok(json.load(open(path))["giant"].get("custom") is True, "places.json lists Giant as custom")
+try:
+    sched.add_place("giant", 40.30, -76.80)
+    dup_err = None
+except sched.SettingsError as e:
+    dup_err = e
+ok(dup_err is not None and dup_err.code == "place_exists", "adding Giant twice is refused")
+
+renamed = sched.rename_place("farm", "the barn")
+ok(renamed["value"] == "the barn" and renamed["status"] == "applied", "Termux renames the farm")
+farm_item = [p for p in sched.places_sync()["places"] if p["id"] == "farm"][0]
+ok(farm_item["spoken_name"] == "the barn", "app_places speaks the new name; the id stays farm")
+with sched._con() as c:
+    ok(sched._resolve_place_id(c, "Barn") == "farm" and sched._resolve_place_id(c, "work") == "hmc",
+       "places are found by spoken name too")
+try:
+    sched.rename_place("gym", "work")
+    taken = None
+except sched.SettingsError as e:
+    taken = e
+ok(taken is not None and taken.code == "place_exists", "a name already in use is refused")
+sched.rename_place("farm", "the farm")
+
+repin = {"lat": giant_pin["lat"] + 0.0002, "lng": giant_pin["lng"] + 0.0002}
+out = sched.cmd_pin("Giant", repin["lat"], repin["lng"])
+ok(out["ok"] and out["key"] == "place.giant.pin" and json.load(open(path))["giant"]["lat"] == repin["lat"],
+   "rivia sched pin re-pins a custom place by name")
+
+# ── Fix 2: voice resize through the app door, applied at once, with undo ──
+sm = change("home", "x")  # not a place key: refused below with a plain reason
+ok(sm["ok"] is False, "a key that is not a setting is refused")
+small = change("place.home.radius_m", "smaller")
+ok(small["ok"] and small["kind"] == "change" and small["data"]["status"] == "applied" and small["data"]["value"] == 50,
+   "make home smaller: 60 - 25 is kept at the 50 m minimum, applied at once (no approval)")
+ok(small["fallback_text"] == "Home is now 50 m (was 60). Say undo to put it back.",
+   "the reply says the new and old size: %s" % small["fallback_text"])
+again = change("place.home.radius_m", "smaller")
+ok(again["ok"] is False and again["error"]["code"] == "no_change" and "50 m" in again["error"]["msg"],
+   "smaller again holds at 50 m")
+back = undo()
+ok(back["ok"] and back["data"]["value"] == 60 and back["data"]["undo_of"] == small["data"]["change_id"]
+   and back["fallback_text"] == "Home is back to 60 m.", "undo that puts home back to exactly 60 m")
+ok(zones()["home"] == 60, "app_places shows home at 60 m again")
+log_cli = json.loads(sh_sched("settings-log").stdout)["changes"]
+home_log = [c for c in log_cli if c["key"] == "place.home.radius_m"]
+ok([c["status"] for c in home_log][-2:] == ["undone", "applied"] and home_log[-1]["reason"] == "undo %s" % small["data"]["change_id"],
+   "rivia sched settings-log shows the resize (undone) and the undo")
+small2 = change("place.home.radius_m", "smaller")
+ok(small2["ok"] and small2["data"]["value"] == 50 and small2["data"]["duplicate"] is False,
+   "a second resize right after an undo is a new change, not a duplicate")
+undo()
+
+farm_big = change("place.the farm.radius_m", "bigger")
+ok(farm_big["ok"] and farm_big["data"]["key"] == "place.farm.radius_m" and farm_big["data"]["value"] == 175
+   and farm_big["fallback_text"] == "The farm is now 175 m (was 150). Say undo to put it back.",
+   "make the farm zone bigger: 150 + 25 = 175 m (by spoken name)")
+farm_back = undo()
+ok(farm_back["ok"] and zones()["farm"] == 150 and farm_back["fallback_text"] == "The farm is back to 150 m."
+   and "radius_m" not in json.load(open(path))["farm"], "undo puts the farm back on the default size")
+for bad in (30, 500):
+    r = change("place.home.radius_m", bad)
+    ok(r["ok"] is False and r["error"]["code"] == "out_of_range" and "50 and 400" in r["error"]["msg"],
+       "set home to %d meters is refused (50 to 400)" % bad)
+sched.set_zone("farm", 390)
+top = change("place.farm.radius_m", "bigger")
+ok(top["ok"] and top["data"]["value"] == 400, "bigger at 390 stops at 400 m")
+top2 = change("place.farm.radius_m", "bigger")
+ok(top2["ok"] is False and top2["error"]["code"] == "no_change" and "400 m" in top2["error"]["msg"],
+   "bigger again holds at 400 m")
+sched.set_zone("farm", 150)
+giant60 = change("place.Giant.radius_m", "60 m")
+ok(giant60["ok"] and giant60["data"]["key"] == "place.giant.radius_m" and zones()["giant"] == 60,
+   "a custom place is resized by its name")
+moon = change("place.moon.radius_m", 100)
+ok(moon["ok"] is False and moon["error"]["code"] == "bad_place", "an unknown place is refused")
+pend = change("place.home.name", "the house")
+ok(pend["ok"] and pend["data"]["status"] == "pending", "a rename from the app door waits for approval")
+sched.reject_change_sync(pend["data"]["change_id"])
+
+# ── remove: soft, custom only ──
+rp.cmd_init_db({})
+rp.cmd_log_ride({"ride_id": "g-1", "from": "home", "to": "giant", "departed": "2026-11-16T12:00:00-05:00",
+                 "arrived": "2026-11-16T12:04:00-05:00"})
+rides_before = rp.load_rides()
+gone = sched.remove_place("Giant")
+ok(gone["value"] == "removed" and "giant" not in zones(), "Giant is removed from app_places")
+ok(json.load(open(path))["giant"].get("removed") is True, "places.json keeps Giant marked removed")
+ok([p["status"] for p in sched.list_places()["places"] if p["id"] == "giant"] == ["removed"],
+   "rivia sched places still lists Giant as removed")
+ok(rp.load_rides() == rides_before and rides_before[0]["to"] == "giant", "removing a place never touches its rides")
+for target, code in (("Giant", "no_change"), ("home", "core_place")):
+    try:
+        sched.remove_place(target)
+        err = None
+    except sched.SettingsError as e:
+        err = e
+    ok(err is not None and err.code == code, "remove %s is refused (%s)" % (target, code))
+    if code == "core_place":
+        ok(str(err) == "Home is a core place and can't be removed.", "the refusal is plain: %s" % err)
+back_giant = sched.add_place("Giant", giant_pin["lat"], giant_pin["lng"])
+ok(back_giant["added"] == "giant" and "giant" in zones(), "a removed place can be added back")
+
+# ── Pin my location (app door): pending, then approved ──
+lib = {"lat": 40.2300, "lng": -76.7600}
+pp = sched.cmd_call("app_pin_place", json.dumps({"coords": "%s,%s" % (lib["lat"], lib["lng"]), "name": "Library"}))
+ok(pp["ok"] and pp["kind"] == "pending" and pp["data"]["status"] == "pending" and pp["data"]["new_place"] is True,
+   "app_pin_place with a new name waits for approval")
+ok("library" not in zones(), "a pending place is not in app_places yet")
+sched.approve_change_sync(pp["data"]["change_id"])
+lib_item = [p for p in sched.places_sync()["places"] if p["id"] == "library"]
+ok(lib_item and lib_item[0]["spoken_name"] == "Library" and lib_item[0]["lat"] == lib["lat"],
+   "approving adds the place with its name and pin")
+pp2 = sched.cmd_call("app_pin_place", json.dumps({"coords": "%s,%s" % (PINS["home"]["lat"] - 0.0003, PINS["home"]["lng"]),
+                                                   "place": "home"}))
+ok(pp2["ok"] and pp2["data"]["status"] == "pending" and pp2["data"]["place_id"] == "home" and zones()["home"] == 60
+   and sched.places_sync()["places"][3]["lat"] == PINS["home"]["lat"],
+   "re-pinning a core place from the app waits too: %s" % (pp2.get("error") or pp2["data"].get("status")))
+sched.reject_change_sync(pp2["data"]["change_id"])
+cli_places = sh_sched("places")
+ok(cli_places.returncode == 0 and json.loads(cli_places.stdout)["ok"], "rivia sched places runs")
 
 # Did not touch the box home database or a real places.json
 ok(os.path.abspath(rp.db_file()).startswith(os.path.abspath(TMP)),
