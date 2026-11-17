@@ -660,6 +660,7 @@ EMOTION = {
     'home_overnight_short_sleep': ('concerned', 0.6, 'normal'),
     'arrived_unknown':            ('curious',   0.3, 'low'),
     'arrival_ignored':            ('quiet',     0.0, 'low'),
+    'morning_rundown':            ('assured',   0.3, 'normal'),
     'leave_reminder':             ('assured',   0.5, 'high'),
     'plan_ready':                 ('composed',  0.3, 'low'),
     'plan_problems':              ('concerned', 0.5, 'normal'),
@@ -679,6 +680,7 @@ EMOTION_NOTES = {
     'home_overnight_short_sleep': 'Flag the short sleep once. Care, not a lecture.',
     'at_work': 'Say nothing.',
     'arrival_ignored': 'Say nothing. A queued, repeated or out-of-order arrival.',
+    'morning_rundown': 'Once a day, when he first opens the app at home. Warm and brief: the greeting, the day, when to leave.',
 }
 
 
@@ -691,7 +693,7 @@ def pfact(pid):
     return {'id': pid, 'name': PLACES[pid]['say']} if pid in PLACES else {'id': pid, 'name': pid}
 
 
-def message(situation, facts, must_say, decisions=None, say=True):
+def message(situation, facts, must_say, decisions=None, say=True, sentences=2):
     tone, intensity, urgency = EMOTION[situation]
     return {
         'situation': situation,
@@ -702,7 +704,7 @@ def message(situation, facts, must_say, decisions=None, say=True):
             'say': say,
             'urgency': urgency,
             'hold_ok': say and urgency != 'high',
-            'max_spoken_sentences': 2,
+            'max_spoken_sentences': sentences,
         },
         'emotion': {'tone': tone, 'intensity': intensity, 'note': EMOTION_NOTES.get(situation, '')},
     }
@@ -824,24 +826,31 @@ def leg_or_none(leg, a, b):
         return None
 
 
-def next_stop_from_home(t_s, shift, leg, leave_work, farm_done=False):
-    """The first stop that still fits before the shift, and the latest time to leave home for it:
-    the farm (unless it was done today), else the gym for that shift, else work."""
+def stops_from_home(t_s, shift, leg, leave_work, farm_done=False):
+    """The stops that still fit before the shift, in order, each with the latest time to leave
+    home for it: the farm (unless it was done today), the gym for that shift, then work."""
     gym_id = gym_for(shift['start'])
     gym_hmc = leg_or_none(leg, gym_id, 'hmc')
+    stops = []
     if not farm_done:
         farm_gym, home_farm = leg_or_none(leg, 'farm', gym_id), leg_or_none(leg, 'home', 'farm')
         if None not in (gym_hmc, farm_gym, home_farm):
             a = workday_anchors(shift['start'], {'farmGym': farm_gym, 'gymHmc': gym_hmc, 'homeFarm': home_farm})
             if t_s < a['leaveHome']:
-                return 'farm', a['leaveHome']
+                stops.append(('farm', a['leaveHome']))
     home_gym = leg_or_none(leg, 'home', gym_id)
-    if gym_hmc is not None and home_gym is not None:
+    if gym_hmc is not None and (stops or home_gym is not None):
         a = workday_anchors(shift['start'], {'farmGym': 0, 'gymHmc': gym_hmc})
-        leave_gym = a['workoutStart'] - home_gym * 60
-        if t_s < leave_gym:
-            return gym_id, leave_gym
-    return 'hmc', leave_work
+        leave_gym = a['workoutStart'] - (home_gym or 0) * 60
+        if stops or t_s < leave_gym:
+            stops.append((gym_id, leave_gym))
+    stops.append(('hmc', leave_work))
+    return stops
+
+
+def next_stop_from_home(t_s, shift, leg, leave_work, farm_done=False):
+    """The first stop that still fits before the shift, and the latest time to leave home for it."""
+    return stops_from_home(t_s, shift, leg, leave_work, farm_done)[0]
 
 
 def home_plan(t_s, now, shift, leg, farm_done=False):
@@ -882,6 +891,80 @@ def home_plan(t_s, now, shift, leg, farm_done=False):
     return result(message('home_overnight_short_sleep' if short else 'home_overnight', facts,
                           ['leave_for_farm_at'] + (['projected_sleep_hours'] if short else [])),
                   leave_alert('farm', a['leaveHome'], now, 'farm', to_farm), fb)
+
+
+def todays_events(events, t_s):
+    """Calendar events for the day of t_s that are not the shift: timed ones not over yet, and
+    all-day ones. Each {title, start (epoch or None), all_day}. At most 3, in time order."""
+    day = day_key(t_s)
+    out = []
+    for raw in events or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get('title') or raw.get('summary') or '').strip()
+        if not title:
+            continue
+        if raw.get('all_day'):
+            first, last = str(raw.get('start') or '')[:10], str(raw.get('end') or raw.get('start') or '')[:10]
+            if first <= day and (day < last or first == last):
+                out.append({'title': title, 'start': None, 'all_day': True})
+            continue
+        ev = norm_event(raw)
+        if is_shift(ev) or day_key(ev['start']) != day or ev['end'] <= t_s:
+            continue
+        out.append({'title': title, 'start': ev['start'], 'all_day': False})
+    out.sort(key=lambda e: (e['start'] is not None, e['start'] or 0))
+    return out[:3]
+
+
+def morning_rundown(t_s, now, events, leg, farm_done=False):
+    """Good morning, once a day at home: today's shift, calendar events, the stops that still fit,
+    and the next stop with the latest time to leave for it. Replaces the welcome-home for that call."""
+    now = max(now, t_s)
+    shift = shift_on(shifts_from(events), day_key(t_s))
+    evs = todays_events(events, t_s)
+    facts = {'greeting': 'Good morning, Jordan.', 'day': long_day(t_s),
+             'events': [{'title': e['title'], 'start': tfact(e['start']) if e['start'] else None, 'all_day': e['all_day']}
+                        for e in evs]}
+    must = ['greeting']
+    lines = ['Good morning, Jordan.']
+    ev_words = ', '.join(e['title'] + ('' if e['all_day'] else ' at ' + time_of_day(e['start'])) for e in evs)
+    alerts = None
+    if not shift:
+        facts['day_off'] = True
+        must.append('day_off')
+        if evs:
+            must.append('events')
+            lines.append('No shift today. On the calendar: %s.' % ev_words)
+        else:
+            lines.append('Day off today, nothing on the calendar.')
+        return result(message('morning_rundown', facts, must, sentences=3), alerts, ' '.join(lines))
+    facts.update(shift_start=tfact(shift['start']), shift_end=tfact(shift['end']), day_off=False)
+    must.append('shift_start')
+    lines.append('Work %s to %s.' % (time_of_day(shift['start']), time_of_day(shift['end'])))
+    if evs:
+        must.append('events')
+        lines.append('Also on the calendar: %s.' % ev_words)
+    if shift['start'] > t_s:
+        hmc_arrive = shift['start'] - CFG['bufferM'] * 60
+        leave_work = hmc_arrive - leg('home', 'hmc') * 60
+        facts['leave_for_work_at'] = tfact(leave_work)
+        if t_s >= leave_work:
+            facts['due_at_work'] = tfact(hmc_arrive)
+            must.append('due_at_work')
+            lines.append('Leave for work now; you are due there at %s.' % clock(hmc_arrive))
+            alerts = []
+        else:
+            stops = stops_from_home(t_s, shift, leg, leave_work, farm_done)
+            stop, leave_at = stops[0]
+            names = [PLACES[p]['say'] for p, _ in stops]
+            facts.update(stops=[pfact(p) for p, _ in stops], next_stop=pfact(stop), leave_at=tfact(leave_at))
+            must += ['next_stop', 'leave_at']
+            order = names[0] if len(names) == 1 else ', '.join(names[:-1]) + ', then ' + names[-1]
+            lines.append('Today: %s. Leave for %s by %s.' % (order, PLACES[stop]['say'], clock(leave_at)))
+            tag = 'work' if stop == 'hmc' else ('farm' if stop == 'farm' else 'gym')
+            alerts = leave_alert(tag, leave_at, now, stop, 'Leave for %s at %s.' % (PLACES[stop]['say'], clock(leave_at)))
+    return result(message('morning_rundown', facts, must, sentences=3), alerts, ' '.join(lines))
 
 
 _UNSET = object()

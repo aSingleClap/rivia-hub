@@ -364,6 +364,13 @@ LOG_RIDE_DESCRIPTION = (
     "ride_id (returns duplicate and does not store a second copy)."
 )
 LAST_ARRIVAL_KEY = "last_arrival"
+META_LAST_DEPARTURE = "last_departure"      # {place, time}: the app's left_at for a same-place return
+META_MORNING_RUNDOWN = "morning_rundown_date"  # YYYY-MM-DD the good-morning rundown was given
+MORNING_FROM_H = 4                          # the rundown starts at 4:00 AM local time
+APP_OPEN_DESCRIPTION = (
+    "The Rivia app was opened. The first open each day after 4:00 AM at home returns the "
+    "good-morning rundown (speak it); every other open returns a quiet reply (say false)."
+)
 
 
 class SettingsError(Exception):
@@ -1956,7 +1963,8 @@ def log_ride_sync(ride):
         return fail("internal", repr(e), "planner", ref=ride.get("ride_id"))
 
 
-def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=None, *, replay=False):
+def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=None, *, replay=False,
+                 left_at=None):
     """Log an optional ride, read the calendar one day each side, run the planner arrival.
 
     Stores the last arrival (place, title, time) so a day change that applies
@@ -1984,9 +1992,13 @@ def arrival_sync(place=None, title=None, coords=None, time=None, ride=None, now=
         is_test = str(title).strip().lower() == "test"
         last = None if (replay or is_test) else _load_last_arrival()
         if not (replay or is_test):
-            ignored = _ignored_arrival(place, coords, title, t_s, now_s, last, ride_out)
-            if ignored:
-                return ignored
+            reason, pid, late_m = _arrival_gate(place, coords, title, t_s, now_s, last, left_at)
+            if reason in ("duplicate", "repeat") and pid == "home" and _rundown_due(t_s, now_s):
+                morning = _morning_reply("arrival", t_s, now, now_s, ride_out)
+                if morning:
+                    return morning  # the good-morning rundown, instead of a welcome-home
+            if reason:
+                return _quiet_arrival(reason, pid, title, t_s, late_m, ride_out)
         custom = bool(place) and place not in rp.PLACES and place != "gymday"
         events = []
         if not is_test and not custom:
@@ -2049,46 +2061,160 @@ def _arrival_time(rec):
         return None
 
 
-def _ignored_arrival(place, coords, title, t_s, now_s, last, ride_out):
-    """A queued arrival the phone flushed late, a repeat, or one older than the last arrival:
-    reply quietly (say=False, alerts null) instead of planning. None means plan as usual."""
+def _departed_since(con, pid, since_s, left_at=None):
+    """Did Jordan leave pid after since_s? The app's left_at, a stored departure, or a ride from pid.
+    (The app keeps exits on the phone; an arrival somewhere else already moves last_arrival.)"""
+    times = []
+    if left_at not in (None, ""):
+        times.append(left_at)
+    try:
+        dep = json.loads(rp.get_meta(con, META_LAST_DEPARTURE) or "null")
+        if isinstance(dep, dict) and dep.get("place") == pid:
+            times.append(dep.get("time"))
+    except ValueError:
+        pass
+    times += [r[0] for r in con.execute("select departed from rides where from_place=?", (pid,))]
+    for t in times:
+        try:
+            if rp.to_epoch(t, "departed") >= since_s:
+                return True
+        except rp.RiviaError:
+            pass
+    return False
+
+
+def _arrival_gate(place, coords, title, t_s, now_s, last, left_at=None):
+    """Why an arrival should be answered quietly, or None to plan it: (reason, place id, late minutes).
+    duplicate: same place within 20 min of the last arrival. repeat: same place, and he has not left
+    since (the app re-sends an ENTER every time it opens). older: before the last arrival.
+    late: the phone queued it longer than arrival_late_minutes."""
     try:
         pid = place or rp.place_of(coords, title)
     except rp.RiviaError:
         pid = place
     pid = rp.gym_for_place(pid, t_s) if pid else None
     last_t = _arrival_time(last)
-    reason = None
-    if last_t is not None:
-        if pid and pid == last.get("place") and abs(t_s - last_t) <= DUP_ARRIVAL_S:
-            reason = "duplicate"
-        elif t_s < last_t:
-            reason = "older"
     late_m = max(0, (now_s - t_s) // 60)
-    if reason is None:
-        con = rp.db_open()
-        try:
-            ensure_settings_schema(con)
-            cutoff = _resolved(con, "arrival_late_minutes")[0]
-            if now_s - t_s > int(cutoff) * 60:
-                reason = "late"
-                rec = {"place": pid, "title": title, "time": rp.iso(t_s), "ignored": "late"}
-                if coords not in (None, ""):
-                    rec["coords"] = coords
-                _save_last_arrival(con, rec)  # still the newest arrival: later repeats match it
-        finally:
-            con.close()
-    if reason is None:
-        return None
-    print("rivia: arrival ignored (%s%s): %s @ %s" % (
-        reason, " %d min" % late_m if reason == "late" else "", pid or title or "?", rp.time_of_day(t_s)),
-        file=sys.stderr)
+    con = rp.db_open()
+    try:
+        ensure_settings_schema(con)
+        if pid and left_at not in (None, ""):
+            try:
+                rp.set_meta(con, META_LAST_DEPARTURE, json.dumps(
+                    {"place": pid, "time": rp.iso(rp.to_epoch(left_at, "left_at"))}, separators=(",", ":")))
+            except rp.RiviaError:
+                pass
+        if last_t is not None and pid and pid == last.get("place"):
+            if abs(t_s - last_t) <= DUP_ARRIVAL_S:
+                return "duplicate", pid, late_m
+            if not _departed_since(con, pid, last_t, left_at):
+                return "repeat", pid, late_m
+        if last_t is not None and t_s < last_t:
+            return "older", pid, late_m
+        cutoff = _resolved(con, "arrival_late_minutes")[0]
+        if now_s - t_s > int(cutoff) * 60:
+            rec = {"place": pid, "title": title, "time": rp.iso(t_s), "ignored": "late"}
+            if coords not in (None, ""):
+                rec["coords"] = coords
+            _save_last_arrival(con, rec)  # still the newest arrival: later repeats match it
+            return "late", pid, late_m
+        return None, pid, late_m
+    finally:
+        con.close()
+
+
+def _quiet(kind, data, facts):
+    msg = rp.message("arrival_ignored", facts, [], say=False)
+    return ok_reply(kind, data, message=msg, alerts=None, fallback_text="")
+
+
+def _quiet_arrival(reason, pid, title, t_s, late_m, ride_out):
+    """Answer an arrival without speaking and without touching the alerts (say=False, alerts null)."""
+    if reason == "repeat":
+        print("rivia: repeat_arrival_ignored: %s @ %s" % (pid or title or "?", rp.time_of_day(t_s)), file=sys.stderr)
+    else:
+        print("rivia: arrival ignored (%s%s): %s @ %s" % (
+            reason, " %d min" % late_m if reason == "late" else "", pid or title or "?", rp.time_of_day(t_s)),
+            file=sys.stderr)
     place_fact = rp.pfact(pid) if pid in rp.PLACES else {"id": pid, "name": pid}
     data = {"place": pid, "arrived": rp.when(t_s), "ignored": reason, "late_minutes": late_m}
     if ride_out is not None:
         data["ride"] = ride_out
-    msg = rp.message("arrival_ignored", {"place": place_fact, "ignored": reason, "late_minutes": late_m}, [], say=False)
-    return ok_reply("arrival", data, message=msg, alerts=None, fallback_text="")
+    return _quiet("arrival", data, {"place": place_fact, "ignored": reason, "late_minutes": late_m})
+
+
+def _rundown_due(t_s, now_s):
+    """The good-morning rundown is due: a fresh event after 4:00 AM, not given yet that day."""
+    if now_s - t_s > 10 * 60 or rp.day_key(t_s) != rp.day_key(now_s) or rp.dt(t_s).hour < MORNING_FROM_H:
+        return False
+    con = rp.db_open()
+    try:
+        return rp.get_meta(con, META_MORNING_RUNDOWN) != rp.day_key(t_s)
+    finally:
+        con.close()
+
+
+def morning_rundown_sync(t_s, now=None, now_s=None):
+    """Build today's rundown (calendar + planner) and mark it given for the day. Raises on failure."""
+    now_s = now_s or t_s
+    day = _arrival_day(t_s)
+    events = gcal.events_for_plan(day, day, before=1, after=1, now=now)
+    ensure_store(now=now)
+    with planner_swap(day=day, now=now):
+        rides = rp.load_rides()
+        leg = rp.Legs(None, rides)
+        out = rp.morning_rundown(t_s, now_s, events, leg, rp.farm_visited(rides, t_s))
+        leg.check()
+    con = rp.db_open()
+    try:
+        rp.set_meta(con, META_MORNING_RUNDOWN, rp.day_key(t_s))
+    finally:
+        con.close()
+    print("rivia: morning_rundown given for %s @ %s" % (rp.day_key(t_s), rp.time_of_day(t_s)), file=sys.stderr)
+    return out
+
+
+def _morning_reply(kind, t_s, now, now_s, ride_out=None):
+    """The rundown as a spoken reply, or None if it could not be built (the call then stays quiet
+    and the next open tries again)."""
+    try:
+        out = morning_rundown_sync(t_s, now=now, now_s=now_s)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: morning_rundown failed (%s)" % (getattr(e, "code", None) or type(e).__name__), file=sys.stderr)
+        return None
+    data = {"place": "home", "arrived": rp.when(t_s), "rundown": True}
+    if ride_out is not None:
+        data["ride"] = ride_out
+    return ok_reply(kind, data, message=out["message"], alerts=out["alerts"], fallback_text=out["speak"])
+
+
+def app_open_sync(now=None):
+    """The app was opened: the good-morning rundown once a day (after 4:00 AM, at home), else quiet."""
+    if not selftest_ok():
+        return fail("selftest_failed",
+                    "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
+                    "planner")
+    now_s = int(now.timestamp()) if (now is not None and hasattr(now, "timestamp")) else rp.now_s()
+    last = _load_last_arrival()
+    if not (last and last.get("place") == "home"):
+        reason = "not_home"
+    elif rp.dt(now_s).hour < MORNING_FROM_H:
+        reason = "before_morning"
+    elif not _rundown_due(now_s, now_s):
+        reason = "already_given"
+    else:
+        morning = _morning_reply("open", now_s, now, now_s)
+        if morning:
+            return morning
+        reason = "rundown_failed"
+    return _quiet("open", {"rundown": False, "reason": reason}, {"ignored": "open", "reason": reason})
+
+
+def app_open_tool() -> dict:
+    return app_open_sync()
+
+
+app_open = tool(app_open_tool)
 
 
 def replay_last_arrival(now=None):
@@ -2135,8 +2261,9 @@ def maybe_refresh_alerts(data, now=None):
 def arrival_tool(place: str | None = None, title: str | None = None,
                  coords: Union[str, dict, None] = None,
                  time: Union[str, int, float, None] = None,
-                 ride: dict | None = None) -> dict:
-    return arrival_sync(place=place, title=title, coords=coords, time=time, ride=ride)
+                 ride: dict | None = None,
+                 left_at: Union[str, int, float, None] = None) -> dict:
+    return arrival_sync(place=place, title=title, coords=coords, time=time, ride=ride, left_at=left_at)
 
 
 def log_ride_tool(ride_id: str, from_place: str | None = None, to_place: str | None = None,
@@ -2735,7 +2862,7 @@ ACTIONS = {
         "fn": arrival,
         "lockable": ("place", "title"),
         "py_params": {"place": "place", "title": "title", "coords": "coords",
-                      "time": "time", "ride": "ride"},
+                      "time": "time", "ride": "ride", "left_at": "left_at"},
         "doors": ("app",),
         "kind": "arrival",
         "time_bearing": True,
@@ -2761,6 +2888,15 @@ ACTIONS = {
         "kind": "change",
         "time_bearing": False,
         "description": PIN_PLACE_DESCRIPTION,
+    },
+    "sched.app_open": {
+        "fn": app_open,
+        "lockable": (),
+        "py_params": {},
+        "doors": ("app",),
+        "kind": "open",
+        "time_bearing": True,
+        "description": APP_OPEN_DESCRIPTION,
     },
     "sched.write_day": {
         "fn": write_day,

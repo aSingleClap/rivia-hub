@@ -46,6 +46,8 @@ SEED = (
      "preset": {}, "description": sched.WRITE_DAY_DESCRIPTION, "model": 1, "enabled": 1},
     {"name": "app_pin_place", "door": "app", "action": "sched.pin_place",
      "preset": {}, "description": sched.PIN_PLACE_DESCRIPTION, "model": 0, "enabled": 1},
+    {"name": "app_open", "door": "app", "action": "sched.app_open",
+     "preset": {}, "description": sched.APP_OPEN_DESCRIPTION, "model": 0, "enabled": 1},
 )
 
 # Seeded descriptions that a later version rewrote. A stored row still holding one of these

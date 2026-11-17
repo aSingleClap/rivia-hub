@@ -92,7 +92,8 @@ ok(set(rows) == {
     ("app_log_ride", "app", "sched.log_ride", 0, 1),
     ("write_day", "app", "sched.write_day", 1, 1),
     ("app_pin_place", "app", "sched.pin_place", 0, 1),
-}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride, write_day, app_pin_place on the app door only")
+    ("app_open", "app", "sched.app_open", 0, 1),
+}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride, write_day, app_pin_place, app_open on the app door only")
 # second open does not duplicate
 tools.open_db().close()
 con = tools.open_db()
@@ -100,7 +101,7 @@ try:
     n = con.execute("select count(*) from tools").fetchone()[0]
 finally:
     con.close()
-ok(n == 10, "seed is idempotent")
+ok(n == 11, "seed is idempotent")
 # JOB-007: an untouched old seed description is refreshed; a hand-edited one is left alone
 con = tools.open_db()
 try:
@@ -328,7 +329,7 @@ async def main():
        and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
        and "undo_schedule_change" not in bt and "app_places" not in bt
        and "app_arrival" not in bt and "app_log_ride" not in bt and "write_day" not in bt
-       and "app_pin_place" not in bt,
+       and "app_pin_place" not in bt and "app_open" not in bt,
        "bot door has no scheduler tools")
     ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
        "admin tools stay off the app and bot doors")

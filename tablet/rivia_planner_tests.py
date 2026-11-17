@@ -311,6 +311,44 @@ def run():
         return '' if ok else 'next %s, missing %s' % (f['next_stop']['id'], lg.missing)
     check('home with no home-gym ride time: work is next, no Maps request', t_home_no_gym_leg)
 
+    # JOB-007b: the once-a-day morning rundown.
+    def iso_at(min_before):
+        return iso(at(min_before))
+    day_events = [
+        {'title': 'Work Shift: test', 'start': iso(shift_start), 'end': iso(shift_start + 32400)},
+        {'title': 'Dentist', 'start': iso_at(330), 'end': iso_at(300)},
+        {'title': 'Holiday', 'start': '2026-10-06', 'end': '2026-10-07', 'all_day': True},
+        {'title': 'Yesterday thing', 'start': iso(shift_start - 86400), 'end': iso(shift_start - 86000)},
+    ]
+
+    def t_rundown():
+        p = morning_rundown(at(400), at(400), day_events, leg)
+        m = p['message']
+        want = ('Good morning, Jordan. Work %s to %s. Also on the calendar: Holiday, Dentist at %s. '
+                'Today: the farm, the gym, then work. Leave for the farm by %s.') % (
+            time_of_day(shift_start), time_of_day(shift_start + 32400), time_of_day(at(330)), clock(at(252)))
+        probs = []
+        if p['speak'] != want:
+            probs.append('speak was ' + p['speak'])
+        if m['situation'] != 'morning_rundown' or m['delivery']['max_spoken_sentences'] != 3 or \
+                any(k not in m['facts'] for k in m['must_say']) or m['facts']['next_stop']['id'] != 'farm':
+            probs.append('message ' + json.dumps({k: m[k] for k in ('situation', 'must_say')}))
+        if one(p, 'leave-farm', at(252) - 300):
+            probs.append(one(p, 'leave-farm', at(252) - 300))
+        later = morning_rundown(at(200), at(200), day_events[:1], leg)
+        if not later['speak'].endswith('Today: the gym, then work. Leave for the gym by %s.' % clock(at(184))):
+            probs.append('later: ' + later['speak'])
+        return ' '.join(probs)
+    check('morning rundown: shift, calendar, stops that fit, next stop and leave time', t_rundown)
+
+    def t_rundown_day_off():
+        off = morning_rundown(at(400), at(400), [], leg)
+        busy = morning_rundown(at(400), at(400), day_events[1:2], leg)
+        ok = (off['speak'] == 'Good morning, Jordan. Day off today, nothing on the calendar.' and off['alerts'] is None and
+              busy['speak'] == 'Good morning, Jordan. No shift today. On the calendar: Dentist at %s.' % time_of_day(at(330)))
+        return '' if ok else 'got %s / %s' % (off['speak'], busy['speak'])
+    check('morning rundown on a day off is one line', t_rundown_day_off)
+
     # ── The ride database (scheduler.db) and its Drive copy ─────────────
     # Each check gets its own empty folder in place of ~/rivia.
 

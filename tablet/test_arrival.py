@@ -352,7 +352,8 @@ ok(g2["ok"] and gr.get("stored") is True and gr.get("used") is False and gr["not
    "a ride to Giant is stored but not learned from")
 n_rides = sched.cmd_rides()["rides"]
 sched.remove_place("giant")
-g3 = sched.arrival_sync(place="giant", time="2026-11-16T14:30:00-05:00", now=at(14, 30, 5))
+g3 = sched.arrival_sync(place="giant", time="2026-11-16T14:30:00-05:00", now=at(14, 30, 5),
+                        left_at="2026-11-16T14:00:00-05:00")  # he left Giant and came back
 ok(g3["ok"] and g3["fallback_text"] == "Arrived at Giant." and sched.cmd_rides()["rides"] == n_rides,
    "a removed place is still named (the phone may lag a day) and its rides stay")
 
@@ -371,6 +372,78 @@ ok(inc.returncode == 0 and back["used"] == orig["used"] and back["note"] == orig
    "rivia sched include-ride puts the ride back exactly as it was")
 usage = sh_sched("exclude-ride", RIDE["ride_id"])
 ok(usage.returncode != 0 and "usage" in (usage.stderr or "").lower(), "exclude-ride needs a reason")
+
+# ══ JOB-007b: no repeat welcome-home on app open; the good-morning rundown once a day ══
+import contextlib, io
+
+
+def on(d, hh, mm, ss=0):
+    return datetime(2026, 11, d, hh, mm, ss, tzinfo=gcal.TZ)
+
+
+def home_at(t, **kw):
+    return sched.arrival_sync(place="home", time=t.isoformat(), now=t + timedelta(seconds=2), **kw)
+
+
+def says(r):
+    return r["ok"] and r["message"]["delivery"]["say"] is True and bool(r["fallback_text"])
+
+
+def quiet(r, reason):
+    return (r["ok"] and r["data"].get("ignored") == reason and r["message"]["delivery"]["say"] is False
+            and r["alerts"] is None and r["fallback_text"] == "")
+
+
+fake.items = [{
+    "summary": "Work Shift - HMC", "status": "confirmed",
+    "start": {"dateTime": "2026-11-17T14:30:00-05:00"}, "end": {"dateTime": "2026-11-17T23:00:00-05:00"},
+    "location": "500 University Dr, Hershey, PA 17033",
+}, {
+    "summary": "Dentist", "status": "confirmed",
+    "start": {"dateTime": "2026-11-17T09:00:00-05:00"}, "end": {"dateTime": "2026-11-17T09:30:00-05:00"},
+}]
+real = home_at(on(16, 23, 48))
+ok(says(real) and "ignored" not in real["data"], "a real arrival home (from another place) is welcomed")
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    night = home_at(on(17, 0, 38))
+ok(quiet(night, "repeat"), "opening the app at 12:38 AM at home: no welcome-home (repeat, before 4 AM)")
+ok("repeat_arrival_ignored" in err.getvalue(), "the repeat is logged as repeat_arrival_ignored")
+morning = home_at(on(17, 8, 4))
+ok(says(morning) and morning["data"].get("rundown") is True and "ignored" not in morning["data"],
+   "first open after 4 AM at home: the good-morning rundown")
+ok(morning["fallback_text"].startswith("Good morning, Jordan. Work 2:30 PM to 11:00 PM.")
+   and "Dentist at 9:00 AM" in morning["fallback_text"] and "Leave for the farm by 10:35." in morning["fallback_text"],
+   "the rundown has the shift, the calendar, and the next stop with its leave time: %s" % morning["fallback_text"])
+ok(morning["message"]["situation"] == "morning_rundown" and "Home." not in morning["fallback_text"],
+   "no welcome-home in the same reply")
+ok(isinstance(morning["alerts"], list) and morning["alerts"] and morning["alerts"][0]["id"].startswith("leave-farm"),
+   "the rundown sets the leave-by alert for the next stop")
+again = [home_at(on(17, 8, 6)), home_at(on(17, 8, 12))]
+ok(all(quiet(r, "repeat") for r in again), "the 8:06 and 8:12 opens are quiet")
+ok(sched._load_last_arrival()["time"] == "2026-11-16T23:48:00-05:00", "repeats never move the last real arrival")
+opened = sched.app_open_sync(now=on(17, 9, 0))
+ok(opened["ok"] and opened["kind"] == "open" and opened["data"] == {"rundown": False, "reason": "already_given"}
+   and opened["message"]["delivery"]["say"] is False, "app_open later the same day is quiet")
+
+farm2 = sched.arrival_sync(place="farm", time=on(17, 10, 40).isoformat(), now=on(17, 10, 40, 2))
+back_home = home_at(on(17, 12, 0))
+ok(says(farm2) and says(back_home) and "ignored" not in back_home["data"], "arrival at the farm, then home: both spoken")
+left = home_at(on(17, 13, 0), left_at=on(17, 12, 30).isoformat())
+ok(says(left) and "ignored" not in left["data"], "home, left (left_at), home again: the return is welcomed")
+ok(quiet(home_at(on(17, 13, 45)), "repeat"), "home again with no departure since: quiet")
+
+fake.items = []
+day_off = sched.app_open_sync(now=on(18, 7, 0))
+ok(day_off["ok"] and day_off["data"].get("rundown") is True
+   and day_off["fallback_text"] == "Good morning, Jordan. Day off today, nothing on the calendar.",
+   "the next day, app_open gives the rundown again (a day off is one line)")
+ok(sched.app_open_sync(now=on(18, 7, 5))["data"]["reason"] == "already_given", "once a day only")
+ok(sched.app_open_sync(now=on(19, 3, 0))["data"]["reason"] == "before_morning", "nothing before 4 AM")
+sched.arrival_sync(place="farm", time=on(19, 9, 0).isoformat(), now=on(19, 9, 0, 2))
+ok(sched.app_open_sync(now=on(19, 9, 5))["data"]["reason"] == "not_home", "no rundown away from home")
+cli_open = sh_sched("call", "app_open", "{}")
+ok(cli_open.returncode == 0 and json.loads(cli_open.stdout)["kind"] == "open", "rivia sched call app_open answers")
 
 # Did not touch the box home database
 ok(os.path.abspath(rp.db_file()).startswith(os.path.abspath(TMP)),
