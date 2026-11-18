@@ -83,6 +83,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -115,6 +116,8 @@ CFG = {
     'rideMaxH': 3,         # a ride longer than this isn't a ride
     'cleanLow': 0.25,      # under 0.25x or over 2x the usual: logged, not learned from
     'cleanHigh': 2,
+    'maxKmh': 60,          # faster than this pin to pin (straight line) isn't a bike ride
+    'fastRatio': 0.5,      # under 0.5x the learned usual (3+ rides): logged, not learned from
 }
 
 PLACES = {
@@ -124,6 +127,9 @@ PLACES = {
     'pf': {'say': 'Planet Fitness', 'addr': '1170 Mae St, Hummelstown, PA 17036'},
     'hmc': {'say': 'work', 'addr': '500 University Dr, Hershey, PA 17033'},
 }
+# Jordan's own places (Giant, ...) live in the server's settings store and reach the planner
+# through places.json, marked "custom": true. Their ids look like this.
+CUSTOM_ID = re.compile(r'^[a-z][a-z0-9_]{0,23}$')
 
 # Jordan's own ride times, minutes, either direction. Used until a ride is learned.
 MEASURED_LEGS = {'farm|home': 5, 'farm|gym': 20, 'farm|hmc': 20, 'gym|hmc': 5, 'hmc|home': 25, 'home|pf': 17}
@@ -279,24 +285,46 @@ def meters_between(a, b):
     return 2 * 6371000 * math.asin(min(1, math.sqrt(h)))
 
 
-def place_pins():
+def place_registry():
+    """Every pinned place in places.json (the server rewrites it from the settings store):
+    id -> {lat, lng, name, radius_m (None = no own zone size), custom, removed}.
+    The five core places plus Jordan's custom ones; bad entries are skipped."""
     try:
         with open(PLACES_FILE) as f:
             raw = json.load(f)
     except (OSError, ValueError):
         return {}
     out = {}
-    for pid, p in (raw or {}).items():
+    for pid, p in (raw.items() if isinstance(raw, dict) else []):
+        info = p if isinstance(p, dict) else {}
+        custom = pid not in PLACES
+        if custom and not (info.get('custom') and CUSTOM_ID.match(str(pid))):
+            continue
         try:
-            if pid in PLACES:
-                out[pid] = parse_coords(p)
+            c = parse_coords(p)
         except RiviaError:
-            pass
+            continue
+        if not c:
+            continue
+        try:
+            radius = int(info['radius_m']) if info.get('radius_m') is not None else None
+        except (TypeError, ValueError):
+            radius = None
+        name = str(info.get('name') or (pid if custom else PLACES[pid]['say']))
+        out[pid] = {'lat': c['lat'], 'lng': c['lng'], 'name': name, 'radius_m': radius,
+                    'custom': custom, 'removed': bool(custom and info.get('removed'))}
     return out
 
 
+def place_pins():
+    """Pins of the places in use (core and custom, not removed)."""
+    return {pid: {'lat': p['lat'], 'lng': p['lng']} for pid, p in place_registry().items() if not p['removed']}
+
+
 def place_of(coords, title):
-    """Title first (the geofence was set for that event); position only as a fallback."""
+    """Title first (the geofence was set for that event); position only as a fallback.
+    A position matches the nearest place within that place's own zone size, or within
+    placeRadiusM for a place without one."""
     by_title = place_from_title(title)
     if by_title:
         return by_title
@@ -304,11 +332,13 @@ def place_of(coords, title):
     if not c:
         return None
     best, best_m = None, float('inf')
-    for pid, p in place_pins().items():
+    for pid, p in place_registry().items():
+        if p['removed']:
+            continue
         m = meters_between(c, p)
-        if m < best_m:
+        if m <= (p['radius_m'] or CFG['placeRadiusM']) and m < best_m:
             best, best_m = pid, m
-    return best if best and best_m <= CFG['placeRadiusM'] else None
+    return best
 
 
 def gym_for(s):
@@ -542,7 +572,7 @@ class Legs:
         self.trips = learned_trips(load_rides() if rides is None else rides)
         self.missing = []
 
-    def info(self, a, b, skip_learned=False):
+    def info(self, a, b, skip_learned=False, note_missing=True):
         if a not in PLACES or b not in PLACES:
             raise RiviaError('bad_place', 'Unknown place: %s or %s.' % (a, b))
         if a == b:
@@ -557,9 +587,13 @@ class Legs:
         m = self.maps.get(a + '>' + b)
         if m:
             return math.ceil(m), 'Maps bike time'
-        if not skip_learned and (a + '>' + b) not in self.missing:
+        if note_missing and not skip_learned and (a + '>' + b) not in self.missing:
             self.missing.append(a + '>' + b)
         return None, 'missing'
+
+    def maybe(self, a, b):
+        """Minutes for a leg, or None when nothing has it. Never asks for a Maps time."""
+        return self.info(a, b, note_missing=False)[0]
 
     def __call__(self, a, b):
         v = self.info(a, b)[0]
@@ -625,6 +659,8 @@ EMOTION = {
     'home_overnight':             ('composed',  0.3, 'low'),
     'home_overnight_short_sleep': ('concerned', 0.6, 'normal'),
     'arrived_unknown':            ('curious',   0.3, 'low'),
+    'arrival_ignored':            ('quiet',     0.0, 'low'),
+    'morning_rundown':            ('assured',   0.3, 'normal'),
     'leave_reminder':             ('assured',   0.5, 'high'),
     'plan_ready':                 ('composed',  0.3, 'low'),
     'plan_problems':              ('concerned', 0.5, 'normal'),
@@ -643,6 +679,8 @@ EMOTION_NOTES = {
     'gym_flex': 'He is ahead. Light, a little playful.',
     'home_overnight_short_sleep': 'Flag the short sleep once. Care, not a lecture.',
     'at_work': 'Say nothing.',
+    'arrival_ignored': 'Say nothing. A queued, repeated or out-of-order arrival.',
+    'morning_rundown': 'Once a day, when he first opens the app at home. Warm and brief: the greeting, the day, when to leave.',
 }
 
 
@@ -655,7 +693,7 @@ def pfact(pid):
     return {'id': pid, 'name': PLACES[pid]['say']} if pid in PLACES else {'id': pid, 'name': pid}
 
 
-def message(situation, facts, must_say, decisions=None, say=True):
+def message(situation, facts, must_say, decisions=None, say=True, sentences=2):
     tone, intensity, urgency = EMOTION[situation]
     return {
         'situation': situation,
@@ -666,7 +704,7 @@ def message(situation, facts, must_say, decisions=None, say=True):
             'say': say,
             'urgency': urgency,
             'hold_ok': say and urgency != 'high',
-            'max_spoken_sentences': 2,
+            'max_spoken_sentences': sentences,
         },
         'emotion': {'tone': tone, 'intensity': intensity, 'note': EMOTION_NOTES.get(situation, '')},
     }
@@ -778,7 +816,44 @@ def gym_plan(t_s, now, shift, leg, gym_id):
                           ['short cardio', 'a longer pre-work', 'a rest day']), alerts, fb)
 
 
-def home_plan(t_s, now, shift, leg):
+def leg_or_none(leg, a, b):
+    """A leg's minutes, or None if nothing knows it. Works for Legs and for a plain function."""
+    if isinstance(leg, Legs):
+        return leg.maybe(a, b)
+    try:
+        return leg(a, b)
+    except (KeyError, RiviaError):
+        return None
+
+
+def stops_from_home(t_s, shift, leg, leave_work, farm_done=False):
+    """The stops that still fit before the shift, in order, each with the latest time to leave
+    home for it: the farm (unless it was done today), the gym for that shift, then work."""
+    gym_id = gym_for(shift['start'])
+    gym_hmc = leg_or_none(leg, gym_id, 'hmc')
+    stops = []
+    if not farm_done:
+        farm_gym, home_farm = leg_or_none(leg, 'farm', gym_id), leg_or_none(leg, 'home', 'farm')
+        if None not in (gym_hmc, farm_gym, home_farm):
+            a = workday_anchors(shift['start'], {'farmGym': farm_gym, 'gymHmc': gym_hmc, 'homeFarm': home_farm})
+            if t_s < a['leaveHome']:
+                stops.append(('farm', a['leaveHome']))
+    home_gym = leg_or_none(leg, 'home', gym_id)
+    if gym_hmc is not None and (stops or home_gym is not None):
+        a = workday_anchors(shift['start'], {'farmGym': 0, 'gymHmc': gym_hmc})
+        leave_gym = a['workoutStart'] - (home_gym or 0) * 60
+        if stops or t_s < leave_gym:
+            stops.append((gym_id, leave_gym))
+    stops.append(('hmc', leave_work))
+    return stops
+
+
+def next_stop_from_home(t_s, shift, leg, leave_work, farm_done=False):
+    """The first stop that still fits before the shift, and the latest time to leave home for it."""
+    return stops_from_home(t_s, shift, leg, leave_work, farm_done)[0]
+
+
+def home_plan(t_s, now, shift, leg, farm_done=False):
     if not shift:
         return result(message('home_no_shift', {'place': pfact('home')}, []), [], 'Home.')
     if shift['start'] - t_s < CFG['overnightH'] * 3600:
@@ -789,9 +864,17 @@ def home_plan(t_s, now, shift, leg):
         if t_s >= leave_work:
             fb = 'Home. Leave for work now; you are due there at %s.' % clock(hmc_arrive)
             return result(message('home_leave_now', base, ['due_at_work']), [], fb)
-        to_work = 'Leave for work at %s.' % clock(leave_work)
-        return result(message('home_before_shift', base, ['leave_for_work_at']),
-                      leave_alert('work', leave_work, now, 'hmc', to_work), 'Home. ' + to_work)
+        stop, leave_at = next_stop_from_home(t_s, shift, leg, leave_work, farm_done)
+        facts = dict(base, next_stop=pfact(stop), leave_at=tfact(leave_at))
+        if stop == 'hmc':
+            text = 'Leave for work at %s.' % clock(leave_work)
+            tag, fb = 'work', 'Home. ' + text
+        else:
+            text = 'Leave for %s at %s.' % (PLACES[stop]['say'], clock(leave_at))
+            tag = 'farm' if stop == 'farm' else 'gym'
+            fb = 'Home. Next stop %s; leave by %s.' % (PLACES[stop]['say'], clock(leave_at))
+        return result(message('home_before_shift', facts, ['next_stop', 'leave_at']),
+                      leave_alert(tag, leave_at, now, stop, text), fb)
     gym_id = gym_for(shift['start'])
     a = workday_anchors(shift['start'], {'farmGym': leg('farm', gym_id), 'gymHmc': leg(gym_id, 'hmc'),
                                          'homeFarm': leg('home', 'farm')})
@@ -810,10 +893,84 @@ def home_plan(t_s, now, shift, leg):
                   leave_alert('farm', a['leaveHome'], now, 'farm', to_farm), fb)
 
 
+def todays_events(events, t_s):
+    """Calendar events for the day of t_s that are not the shift: timed ones not over yet, and
+    all-day ones. Each {title, start (epoch or None), all_day}. At most 3, in time order."""
+    day = day_key(t_s)
+    out = []
+    for raw in events or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get('title') or raw.get('summary') or '').strip()
+        if not title:
+            continue
+        if raw.get('all_day'):
+            first, last = str(raw.get('start') or '')[:10], str(raw.get('end') or raw.get('start') or '')[:10]
+            if first <= day and (day < last or first == last):
+                out.append({'title': title, 'start': None, 'all_day': True})
+            continue
+        ev = norm_event(raw)
+        if is_shift(ev) or day_key(ev['start']) != day or ev['end'] <= t_s:
+            continue
+        out.append({'title': title, 'start': ev['start'], 'all_day': False})
+    out.sort(key=lambda e: (e['start'] is not None, e['start'] or 0))
+    return out[:3]
+
+
+def morning_rundown(t_s, now, events, leg, farm_done=False):
+    """Good morning, once a day at home: today's shift, calendar events, the stops that still fit,
+    and the next stop with the latest time to leave for it. Replaces the welcome-home for that call."""
+    now = max(now, t_s)
+    shift = shift_on(shifts_from(events), day_key(t_s))
+    evs = todays_events(events, t_s)
+    facts = {'greeting': 'Good morning, Jordan.', 'day': long_day(t_s),
+             'events': [{'title': e['title'], 'start': tfact(e['start']) if e['start'] else None, 'all_day': e['all_day']}
+                        for e in evs]}
+    must = ['greeting']
+    lines = ['Good morning, Jordan.']
+    ev_words = ', '.join(e['title'] + ('' if e['all_day'] else ' at ' + time_of_day(e['start'])) for e in evs)
+    alerts = None
+    if not shift:
+        facts['day_off'] = True
+        must.append('day_off')
+        if evs:
+            must.append('events')
+            lines.append('No shift today. On the calendar: %s.' % ev_words)
+        else:
+            lines.append('Day off today, nothing on the calendar.')
+        return result(message('morning_rundown', facts, must, sentences=3), alerts, ' '.join(lines))
+    facts.update(shift_start=tfact(shift['start']), shift_end=tfact(shift['end']), day_off=False)
+    must.append('shift_start')
+    lines.append('Work %s to %s.' % (time_of_day(shift['start']), time_of_day(shift['end'])))
+    if evs:
+        must.append('events')
+        lines.append('Also on the calendar: %s.' % ev_words)
+    if shift['start'] > t_s:
+        hmc_arrive = shift['start'] - CFG['bufferM'] * 60
+        leave_work = hmc_arrive - leg('home', 'hmc') * 60
+        facts['leave_for_work_at'] = tfact(leave_work)
+        if t_s >= leave_work:
+            facts['due_at_work'] = tfact(hmc_arrive)
+            must.append('due_at_work')
+            lines.append('Leave for work now; you are due there at %s.' % clock(hmc_arrive))
+            alerts = []
+        else:
+            stops = stops_from_home(t_s, shift, leg, leave_work, farm_done)
+            stop, leave_at = stops[0]
+            names = [PLACES[p]['say'] for p, _ in stops]
+            facts.update(stops=[pfact(p) for p, _ in stops], next_stop=pfact(stop), leave_at=tfact(leave_at))
+            must += ['next_stop', 'leave_at']
+            order = names[0] if len(names) == 1 else ', '.join(names[:-1]) + ', then ' + names[-1]
+            lines.append('Today: %s. Leave for %s by %s.' % (order, PLACES[stop]['say'], clock(leave_at)))
+            tag = 'work' if stop == 'hmc' else ('farm' if stop == 'farm' else 'gym')
+            alerts = leave_alert(tag, leave_at, now, stop, 'Leave for %s at %s.' % (PLACES[stop]['say'], clock(leave_at)))
+    return result(message('morning_rundown', facts, must, sentences=3), alerts, ' '.join(lines))
+
+
 _UNSET = object()
 
 
-def plan_arrival(place, t_s, title, leg, now, shift=_UNSET, shifts=None):
+def plan_arrival(place, t_s, title, leg, now, shift=_UNSET, shifts=None, farm_done=False):
     now = max(now, t_s)
     if place in ('farm', 'gym', 'pf'):
         s = shift if shift is not _UNSET else shift_today(shifts or [], t_s)
@@ -825,7 +982,7 @@ def plan_arrival(place, t_s, title, leg, now, shift=_UNSET, shifts=None):
         return result(message('at_work', {'place': pfact('hmc')}, [], say=False), [], '')  # at work: say nothing
     if place == 'home':
         s = shift if shift is not _UNSET else next_shift(shifts or [], t_s, CFG['homeLookaheadH'])
-        return home_plan(t_s, now, s, leg)
+        return home_plan(t_s, now, s, leg, farm_done)
     t = str(title or '').strip()[:60]
     return result(message('arrived_unknown', {'place': {'id': None, 'name': t or None}}, []), None,
                   arrived_line(None, title))  # unknown stop: keep current alerts
@@ -951,12 +1108,38 @@ def fmt_num(x):
     return str(int(x)) if float(x) == int(x) else str(x)
 
 
+def too_fast(frm, to, secs, minutes):
+    """A note if the straight line between the two pins needs more than maxKmh; else ''."""
+    pins = place_pins()
+    if frm not in pins or to not in pins or secs <= 0:
+        return ''
+    km = meters_between(pins[frm], pins[to]) / 1000.0
+    kmh = km / (secs / 3600.0)
+    if kmh <= CFG['maxKmh']:
+        return ''
+    return 'Too fast: %.1f km straight-line in %s min (%d km/h), so not learned from.' % (
+        km, fmt_num(minutes), round(kmh))
+
+
 # ── COMMANDS ────────────────────────────────────────────────────────────
 
 def cmd_place(inp):
     raw = place_of(inp.get('coords'), inp.get('title'))
     t = to_epoch(inp['time']) if inp.get('time') else now_s()
     return {'place': gym_for_place(raw, t) if raw else None}
+
+
+def farm_visited(rides, t_s):
+    """A ride to or from the farm earlier the same day (excluded rides count: he was there)."""
+    day = day_key(t_s)
+    for r in rides:
+        if r.get('day') == day and 'farm' in (r.get('from'), r.get('to')):
+            try:
+                if to_epoch(r.get('arrived'), 'arrived') <= t_s:
+                    return True
+            except RiviaError:
+                pass
+    return False
 
 
 def cmd_arrival(inp):
@@ -974,14 +1157,22 @@ def cmd_arrival(inp):
                 'message': message('plumbing_test', {'test_alert_at': tfact(at)}, ['test_alert_at']),
                 'alerts': [test_alert], 'fallback_text': 'Arrived at Test. Test alert in two minutes.'}
     place = inp.get('place') or None
-    if place and place not in PLACES and place != 'gymday':
+    reg = place_registry() if place and place not in PLACES and place != 'gymday' else None
+    if reg is not None and not (place in reg and reg[place]['custom']):
         raise RiviaError('bad_place', 'Unknown place id: %s.' % place)
     if not place:
         place = place_of(inp.get('coords'), title)
     place = gym_for_place(place, t_s) if place else None
+    if place and place not in PLACES:  # one of Jordan's own places: name it, keep the alerts
+        name = (reg if reg is not None else place_registry()).get(place, {}).get('name') or place
+        return {'place': place, 'arrived': when(t_s),
+                'message': message('arrived_unknown', {'place': {'id': place, 'name': name}}, []),
+                'alerts': None, 'fallback_text': 'Arrived at %s.' % name}
     shifts = shifts_from(inp.get('events'))
-    leg = Legs(inp.get('maps'))
-    plan = plan_arrival(place, t_s, title, leg, now, shifts=shifts)
+    rides = load_rides()
+    leg = Legs(inp.get('maps'), rides)
+    farm_done = bool(inp.get('farm_done')) or farm_visited(rides, t_s)
+    plan = plan_arrival(place, t_s, title, leg, now, shifts=shifts, farm_done=farm_done)
     leg.check()
     return {'place': place, 'arrived': when(t_s), 'message': plan['message'], 'alerts': plan['alerts'],
             'fallback_text': plan['speak']}
@@ -1064,21 +1255,32 @@ def cmd_log_ride(inp):
         arr = to_epoch(inp.get('arrived'), 'arrived')
         secs = arr - dep
         minutes = round(secs / 6) / 10
+        reg = None
         for p in (frm, to):
             if p is not None and p not in PLACES:
-                raise RiviaError('bad_place', 'Unknown place id: %s.' % p)
+                reg = place_registry() if reg is None else reg
+                if not (p in reg and reg[p]['custom']):
+                    raise RiviaError('bad_place', 'Unknown place id: %s.' % p)
         note, used = '', False
         if not frm or not to:
             note = 'Start or end is not a known place, so not learned from.'
         elif frm == to:
             note = 'Started and ended at the same place, so not learned from.'
+        elif frm not in PLACES or to not in PLACES:
+            note = 'A custom place, so not learned from.'
         elif not (60 < secs <= CFG['rideMaxH'] * 3600):
             note = 'Under a minute or over %d hours, so not learned from.' % CFG['rideMaxH']
         else:
-            leg = Legs(inp.get('maps'), rides)
-            trips = leg.trips.get(frm + '>' + to, [])
-            usual = rank_min(trips, 0.5) if len(trips) >= CFG['learnMin'] else leg.info(frm, to, True)[0]
-            note = ride_note(minutes, usual)
+            note = too_fast(frm, to, secs, minutes)
+            if not note:
+                leg = Legs(inp.get('maps'), rides)
+                trips = leg.trips.get(frm + '>' + to, [])
+                learned = len(trips) >= CFG['learnMin']
+                usual = rank_min(trips, 0.5) if learned else leg.info(frm, to, True)[0]
+                note = ride_note(minutes, usual)
+                if not note and learned and minutes < CFG['fastRatio'] * usual:
+                    note = 'Under %sx the usual %s min from your rides: probably a geofence firing late.' % (
+                        fmt_num(CFG['fastRatio']), fmt_num(usual))
             used = note == ''
         rec = {
             'ride_id': rid, 'day': day_key(dep), 'from': frm, 'to': to,
@@ -1090,6 +1292,58 @@ def cmd_log_ride(inp):
         insert_ride(con, rec)
         bump_change(con)
         return {'stored': True, 'duplicate': False, 'minutes': minutes, 'used': used, 'note': note, 'backup_due': True}
+    finally:
+        con.close()
+
+
+def exclude_ride(rid, reason):
+    """Mark a ride as not learned from (used=0, note 'excluded: <reason>'). Never deletes it.
+    The old used/note are kept in meta so include_ride can put them back exactly."""
+    rid = str(rid or '').strip()
+    reason = ' '.join(str(reason or '').split())
+    if not rid:
+        raise RiviaError('bad_ride_id', 'ride_id is required.')
+    if not reason:
+        raise RiviaError('bad_reason', 'Give a reason for excluding the ride.')
+    con = db_open()
+    try:
+        row = con.execute('select used, note from rides where ride_id=?', (rid,)).fetchone()
+        if not row:
+            raise RiviaError('no_ride', 'No ride with id %s.' % rid)
+        used, note = bool(row[0]), row[1] or ''
+        if note.startswith('excluded:'):
+            return {'ride_id': rid, 'changed': False, 'used': used, 'note': note, 'backup_due': False}
+        set_meta(con, 'ride_excluded.' + rid, json.dumps({'used': used, 'note': note}))
+        new_note = 'excluded: ' + reason
+        con.execute('update rides set used=0, note=? where ride_id=?', (new_note, rid))
+        bump_change(con)
+        return {'ride_id': rid, 'changed': True, 'used': False, 'note': new_note,
+                'was': {'used': used, 'note': note}, 'backup_due': True}
+    finally:
+        con.close()
+
+
+def include_ride(rid):
+    """Undo exclude_ride: put back the ride's old used/note."""
+    rid = str(rid or '').strip()
+    if not rid:
+        raise RiviaError('bad_ride_id', 'ride_id is required.')
+    con = db_open()
+    try:
+        row = con.execute('select used, note from rides where ride_id=?', (rid,)).fetchone()
+        if not row:
+            raise RiviaError('no_ride', 'No ride with id %s.' % rid)
+        if not (row[1] or '').startswith('excluded:'):
+            raise RiviaError('not_excluded', 'Ride %s is not excluded.' % rid)
+        try:
+            was = json.loads(get_meta(con, 'ride_excluded.' + rid) or '{}')
+        except ValueError:
+            was = {}
+        used, note = bool(was.get('used', True)), str(was.get('note') or '')
+        con.execute('update rides set used=?, note=? where ride_id=?', (1 if used else 0, note, rid))
+        con.execute('delete from meta where key=?', ('ride_excluded.' + rid,))
+        bump_change(con)
+        return {'ride_id': rid, 'changed': True, 'used': used, 'note': note, 'backup_due': True}
     finally:
         con.close()
 

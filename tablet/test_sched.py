@@ -91,7 +91,9 @@ ok(set(rows) == {
     ("app_arrival", "app", "sched.arrival", 0, 1),
     ("app_log_ride", "app", "sched.log_ride", 0, 1),
     ("write_day", "app", "sched.write_day", 1, 1),
-}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride, write_day on the app door only")
+    ("app_pin_place", "app", "sched.pin_place", 0, 1),
+    ("app_open", "app", "sched.app_open", 0, 1),
+}, "seeded tools: ride_time, plan_day, settings, app_places, app_arrival, app_log_ride, write_day, app_pin_place, app_open on the app door only")
 # second open does not duplicate
 tools.open_db().close()
 con = tools.open_db()
@@ -99,7 +101,25 @@ try:
     n = con.execute("select count(*) from tools").fetchone()[0]
 finally:
     con.close()
-ok(n == 9, "seed is idempotent")
+ok(n == 11, "seed is idempotent")
+# JOB-007: an untouched old seed description is refreshed; a hand-edited one is left alone
+con = tools.open_db()
+try:
+    con.execute("update tools set description=? where name='change_schedule_setting'",
+                (tools.OLD_DESCRIPTIONS["change_schedule_setting"][-1],))
+    con.execute("update tools set description='hand edited' where name='undo_schedule_change'")
+    tools.seed_tools(con)
+    desc = dict(con.execute("select name, description from tools"))
+finally:
+    con.close()
+ok(desc["change_schedule_setting"] == sched.CHANGE_SETTING_DESCRIPTION and "radius_m" in desc["change_schedule_setting"],
+   "an old seeded description is refreshed to the zone-size text")
+ok(desc["undo_schedule_change"] == "hand edited", "a hand-edited description is never overwritten")
+con = tools.open_db()
+try:
+    con.execute("update tools set description=? where name='undo_schedule_change'", (sched.UNDO_CHANGE_DESCRIPTION,))
+finally:
+    con.close()
 ok(sched.ACTIONS["sched.get_settings"]["doors"] == ("app",), "get_settings is app door only")
 ok(sched.ACTIONS["sched.change_setting"]["doors"] == ("app",), "change_setting is app door only")
 ok(sched.ACTIONS["sched.undo_change"]["doors"] == ("app",), "undo_change is app door only")
@@ -239,7 +259,8 @@ ok("14:30" not in blob and "leave_home" not in blob and not (bad.get("data") or 
    "calendar failure returns no times")
 
 # Auth-failure hook: at most one first_today per New York day
-first = gcal.record_calendar_auth_failure(gcal.GcalError("calendar_login_expired", gcal.FIX_LOGIN), now=PLAN_NOW)
+# plan_day_sync records on the box clock, so check the same (real) day.
+first = gcal.record_calendar_auth_failure(gcal.GcalError("calendar_login_expired", gcal.FIX_LOGIN))
 # already recorded by plan_day_sync above
 ok(first["first_today"] is False and first["reason"] == "already_today",
    "auth failure is recorded at most once per day")
@@ -307,7 +328,8 @@ async def main():
     ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt
        and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
        and "undo_schedule_change" not in bt and "app_places" not in bt
-       and "app_arrival" not in bt and "app_log_ride" not in bt and "write_day" not in bt,
+       and "app_arrival" not in bt and "app_log_ride" not in bt and "write_day" not in bt
+       and "app_pin_place" not in bt and "app_open" not in bt,
        "bot door has no scheduler tools")
     ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
        "admin tools stay off the app and bot doors")
