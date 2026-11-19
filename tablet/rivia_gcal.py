@@ -123,7 +123,8 @@ def _parse_env_file(path, out):
 
 def load_google_env():
     """Fill RIVIA_GOOGLE_* from ~/.rivia/.env or ~/rivia/.env if they are not already set."""
-    if os.environ.get("RIVIA_GOOGLE_CLIENT_ID") and os.environ.get("RIVIA_GOOGLE_CLIENT_SECRET"):
+    if os.environ.get("RIVIA_GOOGLE_CLIENT_ID") and os.environ.get("RIVIA_GOOGLE_CLIENT_SECRET") \
+            and os.environ.get("RIVIA_GOOGLE_WEB_CLIENT_ID") and os.environ.get("RIVIA_GOOGLE_WEB_CLIENT_SECRET"):
         return
     found = {}
     _parse_env_file(os.path.join(dot_dir(), ".env"), found)
@@ -182,6 +183,33 @@ def clock_status():
     if gap is None:
         return {"clock_gap_s": None, "clock_ok": True}
     return {"clock_gap_s": int(round(gap)), "clock_ok": abs(gap) <= CLOCK_GAP_S}
+
+
+def web_client_creds():
+    """(client_id, client_secret, client_tag) for the app's Google sign-in (POST /app/login).
+    The Android app's serverClientId must be a Web application client. google-login uses a
+    random 127.0.0.1 port, which only a Desktop client allows, so a separate Web client can be
+    set as RIVIA_GOOGLE_WEB_CLIENT_ID / _SECRET; tokens it issues are saved with client "web" so
+    refresh uses the same client. Unset: the usual RIVIA_GOOGLE_CLIENT_ID / _SECRET (tag None)."""
+    load_google_env()
+    cid = (os.environ.get("RIVIA_GOOGLE_WEB_CLIENT_ID") or "").strip()
+    sec = (os.environ.get("RIVIA_GOOGLE_WEB_CLIENT_SECRET") or "").strip()
+    if cid and sec:
+        return cid, sec, "web"
+    cid, sec = client_creds()
+    return cid, sec, None
+
+
+def creds_for(tokens):
+    """The client that issued a saved token: the Web client for a "web" token, else the usual one."""
+    if (tokens or {}).get("client") == "web":
+        cid, sec, tag = web_client_creds()
+        if tag == "web":
+            return cid, sec
+        raise GcalError("calendar_login_expired",
+                        "This Google token came from the app sign-in, but RIVIA_GOOGLE_WEB_CLIENT_ID / "
+                        "_SECRET are not set. Sign in again in the app, or run: rivia sched google-login")
+    return client_creds()
 
 
 def scope_set(scope):
@@ -323,7 +351,7 @@ def exchange_code(code, verifier, redirect_uri):
 
 
 def refresh_access(tokens):
-    cid, sec = client_creds()
+    cid, sec = creds_for(tokens)
     refresh = tokens.get("refresh_token")
     if not refresh:
         raise GcalError("calendar_login_expired", FIX_LOGIN)
@@ -378,6 +406,8 @@ def save_tokens(tokens):
         "scope": tokens.get("scope") or SCOPE_READ,
         "token_type": tokens.get("token_type") or "Bearer",
     }
+    if tokens.get("client") == "web":  # issued to the Web client by the app's sign-in
+        payload["client"] = "web"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as f:

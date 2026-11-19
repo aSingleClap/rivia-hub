@@ -24,6 +24,10 @@ Cursor callbacks + grok.com's) plus http loopback are accepted at /register. Any
 is dropped and logged; `python rivia_auth.py registrations` shows exactly what
 a client asked for, so a new client's callback can be added to RIVIA_REDIRECTS.
 
+App sign-in: POST /app/login {"server_auth_code": ...} (no bearer, no CORS, about 5 a
+minute) turns the app's Google sign-in into the tablet's Google token plus a new app token
+(rivia_applogin.py). Only RIVIA_LOGIN_EMAIL's Google account is accepted.
+
 Browser clients (CORS): a web page can only call this server if its origin is
 listed in RIVIA_CORS_ORIGINS="https://origin1,https://origin2" (exact origins:
 scheme + host + optional port, no path). Unset = no CORS headers, as before.
@@ -112,11 +116,14 @@ PINNED_CLIENTS = {
 if os.environ.get("RIVIA_ALLOW_GROK_WEB", "1") != "1":
     PINNED_CLIENTS = {}
 
-OPEN_PREFIXES = ("/.well-known/", "/authorize", "/token", "/register", "/health")
+OPEN_PREFIXES = ("/.well-known/", "/authorize", "/token", "/register", "/health", "/app/login")
 APP_CLIENT = "rivia-app"  # the Rivia app's client id; it never uses the OAuth flow
 ADMIN_CLIENT = "rivia-admin"
 APP_PREFIX = "/app/"
 ADMIN_PREFIX = "/admin/"
+# The app's Google sign-in (rivia_applogin.py). The only open path on a door, and only exactly
+# this path: /app/login/x, /app/loginx and /app/mcp still need a bearer. No CORS on it.
+APP_LOGIN_PATH = "/app/login"
 # A token whose client_id is in this table opens only its own prefix.
 # Every other token (bots) opens only the rest — never /app/ or /admin/.
 DOORS = {APP_CLIENT: APP_PREFIX, ADMIN_CLIENT: ADMIN_PREFIX}
@@ -212,6 +219,14 @@ def clear_admin_token_file():
         os.remove(path)
     except FileNotFoundError:
         pass
+
+
+def is_open_path(path: str, method: str = "") -> bool:
+    """No bearer needed. Under a door (/app/, /admin/) only a POST to APP_LOGIN_PATH itself is
+    open: any other method there would fall through to the door's MCP app, so it needs a bearer."""
+    if path.startswith(APP_PREFIX) or path.startswith(ADMIN_PREFIX):
+        return path == APP_LOGIN_PATH and method == "POST"
+    return path.startswith(OPEN_PREFIXES)
 
 
 def path_fits_door(path: str, prefix: str) -> bool:
@@ -574,6 +589,12 @@ async def health(request: Request):
     return JSONResponse({"ok": True})
 
 
+async def app_login(request: Request):
+    """POST /app/login: Google sign-in in the app -> the tablet's Google token + the app token."""
+    import rivia_applogin  # loaded on first use; keeps the Google code out of this module
+    return await rivia_applogin.handle(request, mint_door_token)
+
+
 async def echo_stub(scope, receive, send):
     """Placeholder until the real MCP handler is mounted at /mcp."""
     req = Request(scope, receive)
@@ -587,7 +608,7 @@ class BearerGate:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"].startswith(OPEN_PREFIXES):
+        if scope["type"] != "http" or is_open_path(scope["path"], scope.get("method", "")):
             return await self.app(scope, receive, send)
         auth = dict(scope["headers"]).get(b"authorization", b"").decode()
         claims = decode(auth[7:], "access") if auth[:7].lower() == "bearer " else None
@@ -625,7 +646,7 @@ def with_cors(app):
     if not origins:
         return app
     from starlette.middleware.cors import CORSMiddleware
-    return CORSMiddleware(
+    cors = CORSMiddleware(
         app,
         allow_origins=origins,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
@@ -633,6 +654,13 @@ def with_cors(app):
         expose_headers=["mcp-session-id", "mcp-protocol-version", "www-authenticate"],
         max_age=600,
     )
+
+    async def no_cors_for_login(scope, receive, send):
+        # The app's sign-in is for the phone, never a web page: no CORS headers, no preflight.
+        if scope["type"] == "http" and scope["path"] == APP_LOGIN_PATH:
+            return await app(scope, receive, send)
+        return await cors(scope, receive, send)
+    return no_cors_for_login
 
 
 def build_app(mcp_app=None, lifespan=None, app_mcp=None, admin_mcp=None):
@@ -658,6 +686,7 @@ def build_app(mcp_app=None, lifespan=None, app_mcp=None, admin_mcp=None):
         Route("/authorize", authorize, methods=["GET", "POST"]),
         Route("/token", token, methods=["POST"]),
         Route("/health", health),
+        Route(APP_LOGIN_PATH, app_login, methods=["POST"]),
         *tail,
     ]
     return with_cors(BearerGate(Starlette(routes=routes, lifespan=lifespan)))
