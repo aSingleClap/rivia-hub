@@ -24,7 +24,7 @@ import jwt
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-import rivia_gcal as gcal
+import rivia_google as google
 
 LOGIN_PATH = "/app/login"
 RATE_MAX, RATE_WINDOW_S = 5, 60           # about 5 sign-ins a minute, for the whole server
@@ -80,10 +80,10 @@ def _exchange(code, cid, sec):
         "redirect_uri": REDIRECT_URI,
     }).encode()
     try:
-        status, _, body = gcal.http_request("POST", gcal.token_url(),
+        status, _, body = google.http_request("POST", google.token_url(),
                                             headers={"Content-Type": "application/x-www-form-urlencoded"},
                                             data=payload)
-    except gcal.GcalError:
+    except google.GcalError:
         raise Refused(502, "google_unreachable")
     if status != 200:
         raise Refused(403, "google_refused_code")
@@ -125,7 +125,7 @@ def check_id_token(id_token, web_client_id, email, now=None):
 
 def _backup_token_file():
     """Copy the current google_token.json aside (mode 600) before it is replaced."""
-    path = gcal.token_path()
+    path = google.token_path()
     if not os.path.exists(path):
         return None
     dest = "%s.bak-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
@@ -145,14 +145,14 @@ def login(code, mint, now=None):
     if not email:
         raise Refused(503, "not_configured")
     try:
-        cid, sec, client_tag = gcal.web_client_creds()
-    except gcal.GcalError:
+        cid, sec, client_tag = google.web_client_creds()
+    except google.GcalError:
         raise Refused(503, "not_configured")
     data = _exchange(code, cid, sec)
     check_id_token(data.get("id_token"), cid, email, now=now)
     if not data.get("refresh_token") or not data.get("access_token"):
         raise Refused(403, "no_refresh_token")
-    if gcal.missing_scopes(*gcal.SCOPES_WRITE, tokens={"scope": data.get("scope") or ""}):
+    if google.missing_scopes(*google.SCOPES_WRITE, tokens={"scope": data.get("scope") or ""}):
         raise Refused(403, "missing_scopes")
     tokens = {
         "refresh_token": data["refresh_token"],
@@ -165,7 +165,7 @@ def login(code, mint, now=None):
         tokens["client"] = client_tag
     try:
         _backup_token_file()
-        gcal.save_tokens(tokens)
+        google.save_tokens(tokens)
     except OSError:
         raise Refused(500, "token_save_failed")
     try:

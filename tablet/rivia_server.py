@@ -1,124 +1,95 @@
-# rivia_server.py: RIVIA's MCP server on the tablet.
+# rivia_server.py: RIVIA's MCP server on the tablet (core).
 #
-# Three doors, same OAuth gate (rivia_auth.py):
-#   /mcp        for Grok bots (OAuth sign-in): get_tablet_battery, post_reply
-#   /app/mcp    for the Rivia app (token from `rivia token` / mint-token app):
-#               get_tablet_battery, ask_bot, check_reply, plus scheduler tools from
-#               the tool table. The bot door gets no scheduler tools.
-#   /admin/mcp  for the Server Hub (token from `rivia admin-token`, stored on the
-#               tablet, never printed): fixed admin tools, not rows.
-# The gate refuses a reserved token on any other door (403 wrong_door).
+# Two doors behind the bearer gate (rivia_auth.py):
+#   /app/mcp    the Rivia app (app token: `rivia token`, or POST /app/login with Google):
+#               get_tablet_battery (rivia_battery), the read-only hub tools hub_status /
+#               list_tools / list_calls, and the tool-table rows: places tools (always) and
+#               scheduling tools (when scheduling loaded).
+#   /admin/mcp  the Server Hub (token from `rivia admin-token`): fixed admin tools, not rows.
+# The Grok bot door (/mcp, ask_bot / check_reply / post_reply) was removed in the core split;
+# git tag oauth-bot-archive keeps it.
+#
+# Core never depends on scheduling: it is imported in a try, and if it fails (or its planner
+# selftest fails) core and places keep serving.
+import asyncio
 import sys
-from contextlib import AsyncExitStack, asynccontextmanager
-from pathlib import Path
+import traceback
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 
 from fastmcp import FastMCP
 
-import rivia_bots
-
-FAIL_RULE = ("If a tool returns ok=false, report the failure as ok=false and stop that task. "
-             "Never substitute data from another device, an older answer or a guess.")
-
-mcp = FastMCP(
-    "rivia",
-    instructions=("RIVIA's tool server for Jordan's Grok bots. It runs on his Galaxy Tab S7+ at home. "
-                  "When a request came in with a ticket, finish by calling post_reply with that ticket "
-                  "and your JSON reply. " + FAIL_RULE),
-)
+import rivia_tools as tools
 
 app_mcp = FastMCP(
     "rivia-app",
-    instructions=("Tools for Rivia, Jordan's assistant. The bots are parts of Rivia, not other people: "
-                  "whatever a bot does, Rivia did. Speak to Jordan in first person ('I'm checking "
-                  "tomorrow now') and never mention bots, Ard, tickets or tools. ask_bot starts a slow "
-                  "job and returns at once; the answer comes later and the app picks it up with "
-                  "check_reply. Never wait for or invent an answer. " + FAIL_RULE),
+    instructions=("Tools for Rivia, Jordan's assistant. Speak to Jordan in first person and never "
+                  "mention tools. " + tools.FAIL_RULE),
 )
 
 admin_mcp = FastMCP(
     "rivia-admin",
     instructions=("Admin tools for the Rivia Server Hub on the tablet. Fixed tools, not rows. "
-                  "Standing settings applied here take effect at once. " + FAIL_RULE),
+                  "Standing settings applied here take effect at once. " + tools.FAIL_RULE),
 )
 
-PS = Path("/sys/class/power_supply/battery")
+SCHEDULING = {"loaded": False, "error": None}
 
 
-def get_tablet_battery() -> dict:
-    """Battery level and charging state of the Galaxy Tab S7+ that hosts RIVIA.
-    This is NOT the phone the user is talking from; use it whenever they ask about the tablet."""
+def load_parts():
+    """Places always (it ships with core); scheduling if it loads. Returns the scheduling module or None."""
+    import rivia_places  # noqa: F401  registers app_places, app_pin_place, app_arrival, app_open, app_log_ride
     try:
-        level = int((PS / "capacity").read_text().strip())
-    except (OSError, ValueError) as e:
-        return {"ok": False, "device": "Galaxy Tab S7+",
-                "error": f"Tablet battery could not be read ({type(e).__name__}). "
-                         "Report this failure. Do NOT substitute phone or other data."}
+        import rivia_sched
+    except Exception as e:  # noqa: BLE001
+        SCHEDULING.update(loaded=False, error=type(e).__name__)
+        print("rivia: scheduling did not load (%s); core and places keep running." % type(e).__name__,
+              file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+    SCHEDULING.update(loaded=True, error=None)
     try:
-        status = (PS / "status").read_text().strip()
-    except OSError:
-        status = "unknown"
-    return {"ok": True, "device": "Galaxy Tab S7+", "battery_percent": level, "status": status}
+        # Run the planner selftest once at startup (cached; scheduling tools check it). A failure
+        # only blocks scheduling's own tools, never core or places.
+        if not rivia_sched.selftest_ok():
+            print("rivia: planner selftest failed; scheduling tools are blocked, core and places keep running.",
+                  file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print("rivia: planner selftest crashed (%s)." % type(e).__name__, file=sys.stderr)
+    return rivia_sched
 
 
-mcp.tool()(get_tablet_battery)
-app_mcp.tool()(get_tablet_battery)
-
-
-@mcp.tool()
-def post_reply(ticket: str, reply: dict | str) -> dict:
-    """Deliver your answer to a request that came from Rivia. Call this once, as the last step,
-    with the ticket from the request body exactly as given and your full JSON reply envelope
-    as reply. A reply can't be changed after it's stored."""
-    return rivia_bots.post_reply(ticket, reply)
-
-
-@app_mcp.tool(description=(
-    "Start a slow job on one of your own parts (a bot). Returns at once with a ticket; the answer "
-    "comes later, usually in under a minute. Don't wait and don't guess the answer. Tell Jordan in "
-    "first person that you're on it ('Checking now'), never naming the bot, and carry on. Put "
-    "everything the job needs in request, in plain words. Parts: "
-    + rivia_bots.bot_list_text()))
-async def ask_bot(bot: str, request: str) -> dict:
-    return await rivia_bots.ask_bot(bot, request)
-
-
-@app_mcp.tool()
-def check_reply(ticket: str) -> dict:
-    """The answer for a ticket from ask_bot. status pending: not done yet, keep waiting.
-    answered: reply holds the JSON result; speak from that only, in first person. ok false
-    (failed or expired): tell Jordan you couldn't get it done; never make up the answer."""
-    return rivia_bots.check_reply(ticket)
+def build_doors():
+    """Register every tool on the two FastMCP apps. Returns the scheduling module or None."""
+    import rivia_admin
+    import rivia_battery
+    sched = load_parts()
+    rivia_battery.install_on(app_mcp)
+    rivia_admin.install_read_only_on(app_mcp)
+    tools.install_on(app_mcp, door="app")
+    rivia_admin.install_on(admin_mcp)
+    return sched
 
 
 def public_app():
-    """Both doors behind the OAuth layer. This is what the tunnel points at."""
+    """Both doors behind the bearer gate. This is what the tunnel points at."""
     import rivia_auth
-    import rivia_tools
-    # Register row-built scheduler tools on the app door only, before http_app snapshots them.
-    import asyncio
-    import rivia_gcal as gcal
-    from contextlib import suppress
-    import rivia_admin
-    rivia_tools.install_on(app_mcp, door="app")
-    rivia_admin.install_on(admin_mcp)
-    bot_inner = mcp.http_app(path="/mcp")
-    # Mounted under /app, so served at /app/mcp. Stateless + plain JSON: the phone sends one
-    # POST per call (no session, no event stream), which keeps the app's client tiny.
+    sched = build_doors()
+    # Mounted under /app and /admin, so served at /app/mcp and /admin/mcp. Stateless + plain JSON:
+    # one POST per call (no session, no event stream), which keeps the clients tiny.
     app_inner = app_mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
-    # Same shape for the hub: one POST per call, plain JSON, no session.
     admin_inner = admin_mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
 
     @asynccontextmanager
     async def lifespan(app):
         async with AsyncExitStack() as stack:
-            await stack.enter_async_context(bot_inner.lifespan(app))
             await stack.enter_async_context(app_inner.lifespan(app))
             await stack.enter_async_context(admin_inner.lifespan(app))
-            # G1-style daily timer (05:30 ET): Google sign-in check. The later
-            # 7b auto-write job can reuse run_signin_check / maybe_notify_signin_expired.
+            # The daily timer (05:30 ET morning tick, 21:00 evening refresh) belongs to scheduling.
             task = None
-            if gcal.signin_check_enabled():
-                task = asyncio.create_task(gcal.signin_check_loop(), name="rivia-signin-check")
+            if sched is not None:
+                import rivia_gcal as gcal
+                if gcal.signin_check_enabled():
+                    task = asyncio.create_task(gcal.signin_check_loop(), name="rivia-signin-check")
             try:
                 yield
             finally:
@@ -127,20 +98,14 @@ def public_app():
                     with suppress(asyncio.CancelledError):
                         await task
 
-    return rivia_auth.build_app(bot_inner, lifespan=lifespan, app_mcp=app_inner,
-                                   admin_mcp=admin_inner)
+    return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner)
 
 
 if __name__ == "__main__":
-    if "--public" in sys.argv:
-        import uvicorn
-        print("rivia server starting (OAuth, http 127.0.0.1:8787). Ctrl+C to stop.", file=sys.stderr)
-        print("bots: " + (", ".join(rivia_bots.bots()) or "none configured"), file=sys.stderr)
-        uvicorn.run(public_app(), host="127.0.0.1", port=8787, proxy_headers=True)
-    elif "--http" in sys.argv:
-        print("rivia server starting (http :8000, NO AUTH, bot door only). Local only; never with the tunnel up.",
-              file=sys.stderr)
-        mcp.run(transport="http", host="127.0.0.1", port=8000)
-    else:
-        print("rivia server starting (stdio, bot door). Ctrl+C to stop.", file=sys.stderr)
-        mcp.run(transport="stdio")
+    import uvicorn
+    port = 8787
+    if "--port" in sys.argv:
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+    print("rivia server starting (doors /app/mcp and /admin/mcp, http 127.0.0.1:%d). Ctrl+C to stop." % port,
+          file=sys.stderr)
+    uvicorn.run(public_app(), host="127.0.0.1", port=port, proxy_headers=True)

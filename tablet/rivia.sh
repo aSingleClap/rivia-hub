@@ -35,14 +35,12 @@
 #   rivia sched approve <id>  approve a pending standing change
 #   rivia sched reject <id>   reject a pending standing change
 #   rivia logs      last lines of the server and tunnel logs
-#   rivia regs      what clients tried to sign in (and which redirects were refused)
-#   rivia revoke    kill switch: revoke every token (re-add the connector after)
+#   rivia revoke    kill switch: revoke every app and admin token (sign in again in the app after)
 #   rivia restart   stop + start (do this after editing any .py file)
 #   rivia setup     make new secrets in ~/.rivia/.env (only if you have none)
 #   rivia token     make the Rivia app's token (replaces the old one)
 #   rivia admin-token  make the admin-door token (7 days; saved under ~/.rivia, not printed)
 #   rivia install-cli  put `rivia` on PATH ($PREFIX/bin on Termux, else ~/.local/bin)
-#   rivia ask BOT "request"   ask a bot through its webhook and wait for its post_reply
 
 CODE="$HOME/storage/shared/rivia"   # the code you edit
 VENV="$HOME/rivia-venv"             # Python packages (must stay in Termux home)
@@ -336,7 +334,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_bots.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py test_hub_mcp.py test_write_day.py test_app_login.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py test_hub_mcp.py test_write_day.py test_app_login.py test_core_split.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -344,37 +342,17 @@ case "${1:-}" in
              echo "== boot =="; tail -n 5 "$LOGS/boot.log" 2>/dev/null
              echo "== server =="; tail -n 25 "$LOGS/server.log" 2>/dev/null
              echo "== tunnel =="; tail -n 15 "$LOGS/tunnel.log" 2>/dev/null ;;
-    regs)    load_venv; cd "$CODE" && python rivia_auth.py registrations ;;
-    revoke)  load_venv; cd "$CODE" && python rivia_auth.py revoke-all && python rivia_auth.py prune-clients ;;
+    revoke)  load_venv; cd "$CODE" && python rivia_auth.py revoke-all ;;
     setup)   load_venv; mkdir -p "$HOME/.rivia"; chmod 700 "$HOME/.rivia"
              [ -f "$HOME/.rivia/.env" ] && die "~/.rivia/.env already exists. Delete it first if you really want new secrets."
              umask 077; cd "$CODE" || exit 1
              if python rivia_auth.py setup > "$HOME/.rivia/.env.new"; then
                  mv "$HOME/.rivia/.env.new" "$HOME/.rivia/.env"
-                 echo "Saved ~/.rivia/.env. Add RIVIA_TOTP_SECRET from it to your authenticator app."
+                 echo "Saved ~/.rivia/.env (RIVIA_JWT_KEY). Add the Google keys and RIVIA_LOGIN_EMAIL to it."
              else rm -f "$HOME/.rivia/.env.new"; die "setup failed; nothing saved"; fi ;;
     token)   load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-token app "${2:-365}" ;;
     admin-token) load_venv; load_env; cd "$CODE" && python rivia_auth.py mint-token admin "${2:-7}" ;;
     sched)   sched "${@:2}" ;;
     install-cli) install_cli ;;
-    ask)     [ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'usage: rivia ask ard "What does tomorrow look like? Don'"'"'t write anything."'
-             load_venv; load_env; cd "$CODE" || exit 1
-             python - "$2" "$3" <<'PYEOF'
-import asyncio, json, sys, time
-import rivia_bots as b
-r = asyncio.run(b.ask_bot(sys.argv[1], sys.argv[2]))
-print(json.dumps(r, indent=1))
-if not r.get("ok"):
-    sys.exit(1)
-t0 = time.time()
-while True:
-    c = b.check_reply(r["ticket"])
-    if c.get("status") != "pending":
-        print(json.dumps(c, indent=1))
-        print("answer took %d seconds" % (time.time() - t0))
-        break
-    time.sleep(5)
-PYEOF
-             ;;
-    *)       sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

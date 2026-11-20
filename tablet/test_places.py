@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 
 import rivia_planner as rp
 import rivia_sched as sched
+import rivia_approvals as approvals
 
 
 def ok(cond, label):
@@ -185,7 +186,7 @@ ok(sched.places_sync()["radius_m"] == 150, "radius can be set back to 150")
 
 # ══ JOB-007: per-place zone sizes, voice resize with undo, places in the settings store ══
 def changes(key=None):
-    con = rp.db_open()
+    con = approvals.db_open()  # the change log lives in approvals.db since the core split
     try:
         q = "select change_id, door, key, old, new, status, reason from changes"
         rows = list(con.execute(q + (" where key=?" if key else "") + " order by rowid", (key,) if key else ()))

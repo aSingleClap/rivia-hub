@@ -31,6 +31,9 @@ sys.path.insert(0, HERE)
 
 import rivia_planner as rp
 import rivia_sched as sched
+import rivia_approvals as approvals
+import rivia_places as places
+import rivia_store as store
 import rivia_tools as tools
 import rivia_gcal as gcal
 
@@ -48,7 +51,7 @@ SUN = "2026-12-06"
 def changes(con=None):
     close = False
     if con is None:
-        con = rp.db_open()
+        con = approvals.db_open()  # the change log lives in approvals.db since the core split
         close = True
     try:
         return list(con.execute(
@@ -61,7 +64,7 @@ def changes(con=None):
 def standing(key, con=None):
     close = False
     if con is None:
-        con = rp.db_open()
+        con = sched.db_open()  # schedule settings live in scheduler.db
         close = True
     try:
         row = con.execute("select value from settings where key=?", (key,)).fetchone()
@@ -114,21 +117,28 @@ MIG = os.path.join(TMP, "legacy")
 os.makedirs(MIG)
 legacy_path = os.path.join(MIG, "scheduler.db")
 leg = sqlite3.connect(legacy_path)
-leg.executescript(rp.SCHEMA)
+leg.executescript(places.SCHEMA.split("create table if not exists settings")[0]
+                  + "create table if not exists meta(key text primary key, value text);")
 leg.execute("insert into meta values('created','already-there')")
 leg.commit()
 leg.close()
-old_dir = rp.RIVIA_DIR
-rp.RIVIA_DIR = MIG
+old_dir = store.RIVIA_DIR
+store.RIVIA_DIR = MIG  # every part's DB follows the data folder
 try:
     ok("settings" not in [r[0] for r in sqlite3.connect(legacy_path).execute(
         "select name from sqlite_master where type='table'").fetchall()],
        "legacy db has no settings table yet")
     sched.ensure_store()
-    con = rp.db_open()
+    con = sched.db_open()
     try:
         tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
-        ok({"settings", "overrides", "changes"} <= tables, "migration adds settings, overrides, and changes")
+        acon = approvals.db_open()
+        try:
+            atables = {r[0] for r in acon.execute("select name from sqlite_master where type='table'")}
+        finally:
+            acon.close()
+        ok({"settings", "overrides"} <= tables and "changes" in atables,
+           "migration adds settings and overrides (scheduler.db) and changes (approvals.db)")
         ok(standing("ride_estimate.farm_pf", con) == 17 and standing("ride_estimate.hmc_pf", con) == 15,
            "migration seeds 17 and 15 on the existing db")
         ok(con.execute("select value from meta where key='created'").fetchone()[0] == "already-there",
@@ -136,7 +146,7 @@ try:
     finally:
         con.close()
 finally:
-    rp.RIVIA_DIR = old_dir
+    store.RIVIA_DIR = old_dir
 
 
 # ── ride_time uses the seeded estimates ──

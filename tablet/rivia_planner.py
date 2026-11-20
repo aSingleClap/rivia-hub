@@ -90,9 +90,24 @@ import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-TZ = ZoneInfo('America/New_York')
-RIVIA_DIR = os.path.expanduser(os.environ.get('RIVIA_DIR', '~/rivia'))
-PLACES_FILE = os.path.join(RIVIA_DIR, 'places.json')
+import rivia_places as places
+import rivia_store as store
+# Rides and places live in rivia_places (places.db) since the core split; the planner reads them
+# (scheduling reads from places, never the reverse). Re-exported so callers and the selftest keep
+# the old names.
+from rivia_places import (  # noqa: F401
+    CUSTOM_ID, RIDE_FIELDS, place_from_title, parse_coords, meters_between, place_registry, place_pins,
+    gym_for, gym_for_place, db_file, backup_dir, get_meta, set_meta, bump_change, num_or_none,
+    insert_ride, read_rides, read_jsonl, db_open, is_fresh, ride_count, need_restore, load_rides,
+    ride_note, fmt_num, too_fast, exclude_ride, include_ride, sha256_of, cmd_backup, cmd_backup_uploaded,
+    rides_from_copy, cmd_restore, cmd_init_db,
+)
+from rivia_places import log_ride as cmd_log_ride  # noqa: F401
+
+RIVIA_DIR = store.RIVIA_DIR                       # where the data lives (rivia_store decides)
+PLACES_FILE = places.places_file()                # places.json, written by rivia_places
+# The planner's own copy of the core places: planner_swap puts Jordan's spoken names in here.
+PLACES = {pid: dict(p) for pid, p in places.CORE_PLACES.items()}
 VERSION = 'planner 4.2 (port of Code.gs 3.2, rides in SQLite)'
 
 # Schedular v2 config. Same numbers as Code.gs.
@@ -120,16 +135,6 @@ CFG = {
     'fastRatio': 0.5,      # under 0.5x the learned usual (3+ rides): logged, not learned from
 }
 
-PLACES = {
-    'home': {'say': 'home', 'addr': '600 E Main St, Middletown, PA'},
-    'farm': {'say': 'the farm', 'addr': '2003 Vine Street, Middletown, PA 17057'},
-    'gym': {'say': 'the gym', 'addr': '30 Conference Dr, Hershey, PA 17033'},
-    'pf': {'say': 'Planet Fitness', 'addr': '1170 Mae St, Hummelstown, PA 17036'},
-    'hmc': {'say': 'work', 'addr': '500 University Dr, Hershey, PA 17033'},
-}
-# Jordan's own places (Giant, ...) live in the server's settings store and reach the planner
-# through places.json, marked "custom": true. Their ids look like this.
-CUSTOM_ID = re.compile(r'^[a-z][a-z0-9_]{0,23}$')
 
 # Jordan's own ride times, minutes, either direction. Used until a ride is learned.
 MEASURED_LEGS = {'farm|home': 5, 'farm|gym': 20, 'farm|hmc': 20, 'gym|hmc': 5, 'hmc|home': 25, 'home|pf': 17}
@@ -141,212 +146,33 @@ GYM_HOURS = {
 }
 
 
-class RiviaError(Exception):
-    def __init__(self, code, msg, **extra):
-        super().__init__(msg)
-        self.code = code
-        self.extra = extra
-
-
-# ── TIME ────────────────────────────────────────────────────────────────
-
-def to_epoch(v, name='time'):
-    """Epoch seconds from epoch s, epoch ms or ISO 8601 (no offset = New York)."""
-    if isinstance(v, bool) or v is None or v == '':
-        raise RiviaError('bad_time', name + ' is missing.')
-    if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().lstrip('-').replace('.', '', 1).isdigit()):
-        n = float(v)
-        if n > 1e11:
-            n /= 1000.0
-        return int(n)
-    try:
-        d = datetime.fromisoformat(str(v).strip().replace('Z', '+00:00'))
-    except ValueError:
-        raise RiviaError('bad_time', name + ' is not a time: ' + str(v)[:40])
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=TZ)
-    return int(d.timestamp())
-
-
-def now_s():
-    return int(time.time())
-
-
-def dt(s):
-    return datetime.fromtimestamp(s, TZ)
-
-
-def clock(s):
-    """Spoken clock time, like 2:13 (no AM/PM), as Code.gs says it."""
-    d = dt(s)
-    return '%d:%02d' % (d.hour % 12 or 12, d.minute)
-
-
-def time_of_day(s):
-    """Clock time with AM or PM, like 2:13 PM."""
-    d = dt(s)
-    return clock(s) + (' AM' if d.hour < 12 else ' PM')
-
-
-def iso(s):
-    return dt(s).isoformat()
-
-
-def day_key(s):
-    return dt(s).strftime('%Y-%m-%d')
-
-
-def long_day(s):
-    d = dt(s)
-    return '%s %s %d' % (d.strftime('%a'), d.strftime('%b'), d.day)
-
-
-def is_weekend(s):
-    return dt(s).weekday() >= 5  # Saturday 5, Sunday 6
-
-
-def minutes_of_day(s):
-    d = dt(s)
-    return d.hour * 60 + d.minute
-
-
-def noon_of(day_str):
-    y, m, d = (int(x) for x in day_str.split('-'))
-    return int(datetime(y, m, d, 12, tzinfo=TZ).timestamp())
-
-
-def hour12(h):
-    hh = h % 24
-    return '%d %s' % (hh % 12 or 12, 'AM' if hh < 12 else 'PM')
-
-
-def min_words(m):
-    if m < 90:
-        return '%d %s' % (m, 'minute' if m == 1 else 'minutes')
-    h, r = divmod(m, 60)
-    out = '%d %s' % (h, 'hour' if h == 1 else 'hours')
-    return out + (' %d %s' % (r, 'minute' if r == 1 else 'minutes') if r else '')
-
-
-def span_words(m):
-    return '%d-hour' % (m // 60) if m % 60 == 0 else '%d-minute' % m
-
-
-def when(s):
-    """A time as both epoch seconds and local text, for the Bot."""
-    return {'epoch': s, 'local': time_of_day(s), 'iso': iso(s)}
+from rivia_time import (  # noqa: F401  times + RiviaError (core); re-exported for the planner
+    TZ,
+    RiviaError,
+    to_epoch,
+    now_s,
+    dt,
+    clock,
+    time_of_day,
+    iso,
+    day_key,
+    long_day,
+    is_weekend,
+    minutes_of_day,
+    noon_of,
+    hour12,
+    min_words,
+    span_words,
+    when,
+)
 
 
 # ── PLACES ──────────────────────────────────────────────────────────────
 
-def place_from_title(title):
-    """Known place from a calendar title. A title of just Gym returns gymday."""
-    t = str(title or '').lower().strip()
-    if t.startswith('work shift') or 'hershey med' in t:
-        return 'hmc'
-    if 'planet fitness' in t:
-        return 'pf'
-    if 'university fitness' in t:
-        return 'gym'
-    if t == 'gym' or t.startswith('gym '):
-        return 'gymday'
-    if t == 'farm' or t.startswith('farm ') or 'horse care' in t:
-        return 'farm'
-    if t == 'home':
-        return 'home'
-    return None
-
-
-def parse_coords(c):
-    if c is None or c == '':
-        return None
-    if isinstance(c, dict):
-        lat, lng = c.get('lat'), c.get('lng')
-    else:
-        parts = str(c).split(',')
-        if len(parts) != 2:
-            raise RiviaError('bad_coords', 'coords must be lat,lng.')
-        lat, lng = parts
-    try:
-        lat, lng = float(lat), float(lng)
-    except (TypeError, ValueError):
-        raise RiviaError('bad_coords', 'coords are not numbers.')
-    if abs(lat) > 90 or abs(lng) > 180 or (lat == 0 and lng == 0):
-        raise RiviaError('bad_coords', 'coords are not a valid lat,lng.')
-    return {'lat': lat, 'lng': lng}
-
-
-def meters_between(a, b):
-    rad = math.pi / 180
-    d_lat = (b['lat'] - a['lat']) * rad
-    d_lng = (b['lng'] - a['lng']) * rad
-    h = (math.sin(d_lat / 2) ** 2 +
-         math.cos(a['lat'] * rad) * math.cos(b['lat'] * rad) * math.sin(d_lng / 2) ** 2)
-    return 2 * 6371000 * math.asin(min(1, math.sqrt(h)))
-
-
-def place_registry():
-    """Every pinned place in places.json (the server rewrites it from the settings store):
-    id -> {lat, lng, name, radius_m (None = no own zone size), custom, removed}.
-    The five core places plus Jordan's custom ones; bad entries are skipped."""
-    try:
-        with open(PLACES_FILE) as f:
-            raw = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    out = {}
-    for pid, p in (raw.items() if isinstance(raw, dict) else []):
-        info = p if isinstance(p, dict) else {}
-        custom = pid not in PLACES
-        if custom and not (info.get('custom') and CUSTOM_ID.match(str(pid))):
-            continue
-        try:
-            c = parse_coords(p)
-        except RiviaError:
-            continue
-        if not c:
-            continue
-        try:
-            radius = int(info['radius_m']) if info.get('radius_m') is not None else None
-        except (TypeError, ValueError):
-            radius = None
-        name = str(info.get('name') or (pid if custom else PLACES[pid]['say']))
-        out[pid] = {'lat': c['lat'], 'lng': c['lng'], 'name': name, 'radius_m': radius,
-                    'custom': custom, 'removed': bool(custom and info.get('removed'))}
-    return out
-
-
-def place_pins():
-    """Pins of the places in use (core and custom, not removed)."""
-    return {pid: {'lat': p['lat'], 'lng': p['lng']} for pid, p in place_registry().items() if not p['removed']}
-
 
 def place_of(coords, title):
-    """Title first (the geofence was set for that event); position only as a fallback.
-    A position matches the nearest place within that place's own zone size, or within
-    placeRadiusM for a place without one."""
-    by_title = place_from_title(title)
-    if by_title:
-        return by_title
-    c = parse_coords(coords)
-    if not c:
-        return None
-    best, best_m = None, float('inf')
-    for pid, p in place_registry().items():
-        if p['removed']:
-            continue
-        m = meters_between(c, p)
-        if m <= (p['radius_m'] or CFG['placeRadiusM']) and m < best_m:
-            best, best_m = pid, m
-    return best
-
-
-def gym_for(s):
-    return 'pf' if is_weekend(s) else 'gym'
-
-
-def gym_for_place(place, s):
-    return gym_for(s) if place == 'gymday' else place
+    """Title first; position only as a fallback (rivia_places.place_of, with this plan's placeRadiusM)."""
+    return places.place_of(coords, title, default_radius=CFG['placeRadiusM'])
 
 
 def gym_name(pid):
@@ -414,128 +240,6 @@ def shift_on(shifts, day):
 
 
 # ── RIDE DATABASE (SQLite) ──────────────────────────────────────────────
-
-SCHEMA = """
-create table if not exists rides(
-    ride_id text primary key, day text, from_place text, to_place text,
-    departed text, arrived text, left_local text, arrived_local text,
-    minutes real, used integer, note text, distance_km real, avg_kmh real,
-    polyline text, logged text);
-create table if not exists meta(key text primary key, value text);
-"""
-RIDE_FIELDS = ['ride_id', 'day', 'from', 'to', 'departed', 'arrived', 'left_local', 'arrived_local',
-               'minutes', 'used', 'note', 'distance_km', 'avg_kmh', 'polyline', 'logged']
-
-
-def db_file():
-    return os.path.join(RIVIA_DIR, 'scheduler.db')
-
-
-def backup_dir():
-    return os.path.join(RIVIA_DIR, 'backup')
-
-
-def get_meta(con, key, default=None):
-    row = con.execute('select value from meta where key=?', (key,)).fetchone()
-    return row[0] if row else default
-
-
-def set_meta(con, key, value):
-    con.execute('insert or replace into meta values(?,?)', (key, str(value)))
-
-
-def bump_change(con):
-    """Every write bumps this counter; backup compares it with the last upload."""
-    set_meta(con, 'change', int(get_meta(con, 'change', '0')) + 1)
-
-
-def num_or_none(v):
-    try:
-        return None if v is None or v == '' else float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def insert_ride(con, r):
-    """Insert one ride record; an existing ride_id is left alone. Returns 1 if added."""
-    rid = str(r.get('ride_id') or '').strip()
-    if not rid:
-        return 0
-    cur = con.execute(
-        'insert or ignore into rides values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        (rid, r.get('day'), r.get('from'), r.get('to'), r.get('departed'), r.get('arrived'),
-         r.get('left_local'), r.get('arrived_local'), num_or_none(r.get('minutes')),
-         1 if r.get('used') else 0, r.get('note') or '', num_or_none(r.get('distance_km')),
-         num_or_none(r.get('avg_kmh')), r.get('polyline'), r.get('logged')))
-    return cur.rowcount
-
-
-def read_rides(con):
-    out = []
-    for row in con.execute('select * from rides order by rowid'):
-        r = dict(zip(RIDE_FIELDS, row))
-        r['used'] = bool(r['used'])
-        out.append(r)
-    return out
-
-
-def read_jsonl(path):
-    out = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    pass  # a broken line never stops anything
-    return out
-
-
-def db_open():
-    """Open scheduler.db, creating it if needed. A new file takes in rides.jsonl if there is one;
-    otherwise it is marked fresh until restore or init-db runs."""
-    path = db_file()
-    new = not os.path.exists(path)
-    try:
-        os.makedirs(RIVIA_DIR, exist_ok=True)
-        con = sqlite3.connect(path, timeout=10, isolation_level=None)
-        con.executescript(SCHEMA)
-        if new:
-            old = os.path.join(RIVIA_DIR, 'rides.jsonl')
-            set_meta(con, 'created', iso(now_s()))
-            if os.path.exists(old):
-                for r in read_jsonl(old):
-                    insert_ride(con, r)
-                bump_change(con)
-                os.replace(old, old + '.migrated')
-            else:
-                set_meta(con, 'fresh', '1')
-        return con
-    except sqlite3.Error as e:
-        raise RiviaError('db_error', 'scheduler.db could not be opened: %s' % e)
-
-
-def is_fresh(con):
-    return get_meta(con, 'fresh') == '1'
-
-
-def ride_count(con):
-    return con.execute('select count(*) from rides').fetchone()[0]
-
-
-def need_restore(con):
-    if is_fresh(con):
-        raise RiviaError('restore_first', 'scheduler.db is new and empty. Restore the Drive copy first '
-                         '(download it, then run restore), or run init-db if Drive has no copy.')
-
-
-def load_rides():
-    con = db_open()
-    try:
-        return read_rides(con)
-    finally:
-        con.close()
 
 
 # ── RIDE TIMES ──────────────────────────────────────────────────────────
@@ -607,6 +311,14 @@ class Legs:
                 pairs.append({'key': k, 'from': a, 'to': b, 'from_addr': PLACES[a]['addr'], 'to_addr': PLACES[b]['addr']})
             raise RiviaError('need_maps', 'Need Maps bike times (minutes) for: ' + ', '.join(self.missing) +
                              '. Look them up and run again with "maps" filled in.', pairs=pairs)
+
+
+def _ride_estimate(a, b, maps=None):
+    """Jordan's own estimate (or a Maps time) for a ride, for places' ride sanity check."""
+    return Legs(maps, rides=[]).info(a, b, True)[0]
+
+
+places.set_hook("ride_estimate", _ride_estimate)
 
 
 # ── ARRIVALS (Schedular v2) ─────────────────────────────────────────────
@@ -1094,32 +806,6 @@ def block_out(b):
 
 # ── RIDE LOGGING ────────────────────────────────────────────────────────
 
-def ride_note(minutes, usual):
-    if usual is None or not usual or usual <= 0:
-        return ''
-    if minutes > CFG['cleanHigh'] * usual:
-        return 'Over %sx the usual %s min: probably a stop on the way.' % (fmt_num(CFG['cleanHigh']), fmt_num(usual))
-    if minutes < CFG['cleanLow'] * usual:
-        return 'Under %sx the usual %s min: probably a geofence firing late.' % (fmt_num(CFG['cleanLow']), fmt_num(usual))
-    return ''
-
-
-def fmt_num(x):
-    return str(int(x)) if float(x) == int(x) else str(x)
-
-
-def too_fast(frm, to, secs, minutes):
-    """A note if the straight line between the two pins needs more than maxKmh; else ''."""
-    pins = place_pins()
-    if frm not in pins or to not in pins or secs <= 0:
-        return ''
-    km = meters_between(pins[frm], pins[to]) / 1000.0
-    kmh = km / (secs / 3600.0)
-    if kmh <= CFG['maxKmh']:
-        return ''
-    return 'Too fast: %.1f km straight-line in %s min (%d km/h), so not learned from.' % (
-        km, fmt_num(minutes), round(kmh))
-
 
 # ── COMMANDS ────────────────────────────────────────────────────────────
 
@@ -1238,116 +924,6 @@ def cmd_plan(inp):
     return {'days': out_days, 'rides': ride_notes}
 
 
-def cmd_log_ride(inp):
-    rid = str(inp.get('ride_id') or '').strip()
-    if not rid or len(rid) > 100:
-        raise RiviaError('bad_ride_id', 'ride_id is required (up to 100 characters).')
-    con = db_open()
-    try:
-        need_restore(con)
-        row = con.execute('select minutes, used from rides where ride_id=?', (rid,)).fetchone()
-        if row:
-            return {'stored': False, 'duplicate': True, 'minutes': row[0], 'used': bool(row[1]),
-                    'note': 'Already stored; nothing changed.', 'backup_due': False}
-        rides = read_rides(con)
-        frm, to = inp.get('from') or None, inp.get('to') or None
-        dep = to_epoch(inp.get('departed'), 'departed')
-        arr = to_epoch(inp.get('arrived'), 'arrived')
-        secs = arr - dep
-        minutes = round(secs / 6) / 10
-        reg = None
-        for p in (frm, to):
-            if p is not None and p not in PLACES:
-                reg = place_registry() if reg is None else reg
-                if not (p in reg and reg[p]['custom']):
-                    raise RiviaError('bad_place', 'Unknown place id: %s.' % p)
-        note, used = '', False
-        if not frm or not to:
-            note = 'Start or end is not a known place, so not learned from.'
-        elif frm == to:
-            note = 'Started and ended at the same place, so not learned from.'
-        elif frm not in PLACES or to not in PLACES:
-            note = 'A custom place, so not learned from.'
-        elif not (60 < secs <= CFG['rideMaxH'] * 3600):
-            note = 'Under a minute or over %d hours, so not learned from.' % CFG['rideMaxH']
-        else:
-            note = too_fast(frm, to, secs, minutes)
-            if not note:
-                leg = Legs(inp.get('maps'), rides)
-                trips = leg.trips.get(frm + '>' + to, [])
-                learned = len(trips) >= CFG['learnMin']
-                usual = rank_min(trips, 0.5) if learned else leg.info(frm, to, True)[0]
-                note = ride_note(minutes, usual)
-                if not note and learned and minutes < CFG['fastRatio'] * usual:
-                    note = 'Under %sx the usual %s min from your rides: probably a geofence firing late.' % (
-                        fmt_num(CFG['fastRatio']), fmt_num(usual))
-            used = note == ''
-        rec = {
-            'ride_id': rid, 'day': day_key(dep), 'from': frm, 'to': to,
-            'departed': iso(dep), 'arrived': iso(arr), 'left_local': time_of_day(dep), 'arrived_local': time_of_day(arr),
-            'minutes': minutes, 'used': used, 'note': note,
-            'distance_km': inp.get('distance_km'), 'avg_kmh': inp.get('avg_kmh'), 'polyline': inp.get('polyline'),
-            'logged': iso(now_s()),
-        }
-        insert_ride(con, rec)
-        bump_change(con)
-        return {'stored': True, 'duplicate': False, 'minutes': minutes, 'used': used, 'note': note, 'backup_due': True}
-    finally:
-        con.close()
-
-
-def exclude_ride(rid, reason):
-    """Mark a ride as not learned from (used=0, note 'excluded: <reason>'). Never deletes it.
-    The old used/note are kept in meta so include_ride can put them back exactly."""
-    rid = str(rid or '').strip()
-    reason = ' '.join(str(reason or '').split())
-    if not rid:
-        raise RiviaError('bad_ride_id', 'ride_id is required.')
-    if not reason:
-        raise RiviaError('bad_reason', 'Give a reason for excluding the ride.')
-    con = db_open()
-    try:
-        row = con.execute('select used, note from rides where ride_id=?', (rid,)).fetchone()
-        if not row:
-            raise RiviaError('no_ride', 'No ride with id %s.' % rid)
-        used, note = bool(row[0]), row[1] or ''
-        if note.startswith('excluded:'):
-            return {'ride_id': rid, 'changed': False, 'used': used, 'note': note, 'backup_due': False}
-        set_meta(con, 'ride_excluded.' + rid, json.dumps({'used': used, 'note': note}))
-        new_note = 'excluded: ' + reason
-        con.execute('update rides set used=0, note=? where ride_id=?', (new_note, rid))
-        bump_change(con)
-        return {'ride_id': rid, 'changed': True, 'used': False, 'note': new_note,
-                'was': {'used': used, 'note': note}, 'backup_due': True}
-    finally:
-        con.close()
-
-
-def include_ride(rid):
-    """Undo exclude_ride: put back the ride's old used/note."""
-    rid = str(rid or '').strip()
-    if not rid:
-        raise RiviaError('bad_ride_id', 'ride_id is required.')
-    con = db_open()
-    try:
-        row = con.execute('select used, note from rides where ride_id=?', (rid,)).fetchone()
-        if not row:
-            raise RiviaError('no_ride', 'No ride with id %s.' % rid)
-        if not (row[1] or '').startswith('excluded:'):
-            raise RiviaError('not_excluded', 'Ride %s is not excluded.' % rid)
-        try:
-            was = json.loads(get_meta(con, 'ride_excluded.' + rid) or '{}')
-        except ValueError:
-            was = {}
-        used, note = bool(was.get('used', True)), str(was.get('note') or '')
-        con.execute('update rides set used=?, note=? where ride_id=?', (1 if used else 0, note, rid))
-        con.execute('delete from meta where key=?', ('ride_excluded.' + rid,))
-        bump_change(con)
-        return {'ride_id': rid, 'changed': True, 'used': used, 'note': note, 'backup_due': True}
-    finally:
-        con.close()
-
-
 def cmd_legs(inp):
     pairs = inp.get('pairs')
     if not isinstance(pairs, list) or not pairs:
@@ -1361,109 +937,6 @@ def cmd_legs(inp):
         out.append({'from': p[0], 'to': p[1], 'minutes': mins, 'source': src})
     leg.check()
     return {'legs': out}
-
-
-def sha256_of(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(65536), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def cmd_backup(inp):
-    con = db_open()
-    try:
-        need_restore(con)
-        change = get_meta(con, 'change', '0')
-        os.makedirs(backup_dir(), exist_ok=True)
-        db_out = os.path.join(backup_dir(), 'scheduler.db')
-        json_out = os.path.join(backup_dir(), 'scheduler.json')
-        if (not inp.get('force') and change == get_meta(con, 'uploaded_change')
-                and os.path.exists(db_out) and os.path.exists(json_out)):
-            return {'upload': False, 'reason': 'No new rides since the last upload.', 'rides': ride_count(con)}
-        tmp = db_out + '.tmp'
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        dst = sqlite3.connect(tmp)
-        con.backup(dst)  # consistent copy even if a write is in progress
-        dst.close()
-        os.replace(tmp, db_out)
-        rides = read_rides(con)
-        with open(json_out + '.tmp', 'w') as f:
-            json.dump({'version': VERSION, 'exported': iso(now_s()), 'change': change, 'rides': rides}, f)
-        os.replace(json_out + '.tmp', json_out)
-        return {'upload': True, 'db_path': db_out, 'json_path': json_out, 'rides': len(rides),
-                'bytes': os.path.getsize(db_out), 'sha256': sha256_of(db_out), 'change': change}
-    finally:
-        con.close()
-
-
-def cmd_backup_uploaded(inp):
-    change = str(inp.get('change') or '').strip()
-    if not change:
-        raise RiviaError('bad_change', 'change is required: copy it from the backup reply.')
-    con = db_open()
-    try:
-        set_meta(con, 'uploaded_change', change)
-        set_meta(con, 'uploaded_at', iso(now_s()))
-        return {'marked': True, 'change': change, 'current_change': get_meta(con, 'change', '0')}
-    finally:
-        con.close()
-
-
-def rides_from_copy(path):
-    """Rides from a Drive copy: a scheduler.db or a scheduler.json made by backup."""
-    if not path or not os.path.isfile(path):
-        raise RiviaError('bad_copy', 'No file at %s.' % path)
-    with open(path, 'rb') as f:
-        head = f.read(16)
-    if head == b'SQLite format 3\x00':
-        try:
-            src = sqlite3.connect('file:%s?mode=ro' % path, uri=True)
-            try:
-                if src.execute('pragma integrity_check').fetchone()[0] != 'ok':
-                    raise RiviaError('bad_copy', 'The copy failed SQLite integrity_check.')
-                if not src.execute("select 1 from sqlite_master where type='table' and name='rides'").fetchone():
-                    raise RiviaError('bad_copy', 'The copy has no rides table.')
-                return read_rides(src)
-            finally:
-                src.close()
-        except sqlite3.Error as e:
-            raise RiviaError('bad_copy', 'The copy is not a readable database: %s' % e)
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        raise RiviaError('bad_copy', 'The copy is neither a SQLite database nor backup JSON.')
-    if not isinstance(data, dict) or not isinstance(data.get('rides'), list):
-        raise RiviaError('bad_copy', 'The JSON copy has no rides list.')
-    return data['rides']
-
-
-def cmd_restore(inp):
-    rides = rides_from_copy(inp.get('path'))
-    con = db_open()
-    try:
-        before = ride_count(con)
-        added = sum(insert_ride(con, r) for r in rides if isinstance(r, dict))
-        con.execute("delete from meta where key='fresh'")
-        if added:
-            bump_change(con)
-        return {'added': added, 'in_copy': len(rides), 'rides_before': before, 'rides': ride_count(con)}
-    finally:
-        con.close()
-
-
-def cmd_init_db(inp):
-    con = db_open()
-    try:
-        if not is_fresh(con):
-            return {'initialized': False, 'rides': ride_count(con), 'note': 'Not a new database; nothing changed.'}
-        con.execute("delete from meta where key='fresh'")
-        return {'initialized': True, 'rides': ride_count(con)}
-    finally:
-        con.close()
 
 
 # ── SELF-TEST (checks live in rivia_planner_tests.py, next to this file) ─

@@ -1,15 +1,26 @@
-# rivia_tools.py: the scheduler tool table and call log in scheduler.db.
-# Rows are built with Tool.from_tool and registered on a door. Seeded on the app door as actions ship (G5). plan_week has no seeded row; there is no tool editing yet. Settings rows ship with 7a-2.
+# rivia_tools.py (core): the tool table and the call log, in core.db, and the action registry.
+# Rows are built with Tool.from_tool and registered on a door. Each part of Rivia (places,
+# scheduling) registers its actions and seed rows here when it loads; core never imports them,
+# so a part that fails to load only loses its own tools. Action ids such as "sched.arrival" are
+# kept from before the core split because the stored rows name them.
 import json
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform
 
-import rivia_planner as rp
-import rivia_sched as sched
+import rivia_store as store
 
 CALL_LIMIT = 500
+TZ = ZoneInfo("America/New_York")
+
+FAIL_RULE = ("If a tool returns ok=false, report the failure as ok=false and stop that task. "
+             "Never substitute data from another device, an older answer or a guess.")
+PENDING_LINE = "A pending result has not happened yet."
+TIME_LINE = ("Say times exactly as their spoken value, never work one out, "
+             "say every must_say fact, offer decisions_for_jordan and never pick one.")
 
 SCHEMA = """
 create table if not exists tools(
@@ -21,64 +32,57 @@ create table if not exists calls(
     ts text not null, door text not null, tool text not null,
     action text not null, ok integer not null, code text, ms integer not null);
 """
+MIGRATE = [("tools", ""), ("calls", "order by rowid")]
 
-RIDE_TIME_SEED_DESCRIPTION = sched.RIDE_TIME_DESCRIPTION
+# action id -> {fn, lockable, py_params, doors, kind, time_bearing, description, pending_line}
+ACTIONS = {}
+# seed rows by name; a part registers them with its actions ("insert or ignore" on every open)
+SEED = {}
+# seeded descriptions a later version rewrote: refreshed only if the row still holds one exactly
+OLD_DESCRIPTIONS = {}
 
-# Seeded on first start, only for actions that exist now (G5).
-SEED = (
-    {"name": "ride_time", "door": "app", "action": "sched.ride_time",
-     "preset": {}, "description": RIDE_TIME_SEED_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "plan_day", "door": "app", "action": "sched.plan_day",
-     "preset": {}, "description": sched.PLAN_DAY_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "get_schedule_settings", "door": "app", "action": "sched.get_settings",
-     "preset": {"group": "schedule"}, "description": sched.GET_SETTINGS_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "change_schedule_setting", "door": "app", "action": "sched.change_setting",
-     "preset": {}, "description": sched.CHANGE_SETTING_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "undo_schedule_change", "door": "app", "action": "sched.undo_change",
-     "preset": {}, "description": sched.UNDO_CHANGE_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "app_places", "door": "app", "action": "sched.places",
-     "preset": {}, "description": sched.PLACES_DESCRIPTION, "model": 0, "enabled": 1},
-    {"name": "app_arrival", "door": "app", "action": "sched.arrival",
-     "preset": {}, "description": sched.ARRIVAL_DESCRIPTION, "model": 0, "enabled": 1},
-    {"name": "app_log_ride", "door": "app", "action": "sched.log_ride",
-     "preset": {}, "description": sched.LOG_RIDE_DESCRIPTION, "model": 0, "enabled": 1},
-    {"name": "write_day", "door": "app", "action": "sched.write_day",
-     "preset": {}, "description": sched.WRITE_DAY_DESCRIPTION, "model": 1, "enabled": 1},
-    {"name": "app_pin_place", "door": "app", "action": "sched.pin_place",
-     "preset": {}, "description": sched.PIN_PLACE_DESCRIPTION, "model": 0, "enabled": 1},
-    {"name": "app_open", "door": "app", "action": "sched.app_open",
-     "preset": {}, "description": sched.APP_OPEN_DESCRIPTION, "model": 0, "enabled": 1},
-)
 
-# Seeded descriptions that a later version rewrote. A stored row still holding one of these
-# exact texts was never edited by hand, so seed_tools updates it to the current text.
-OLD_DESCRIPTIONS = {
-    "change_schedule_setting": (
-        "Change one of Jordan's schedule settings. scope is day (that date only, today "
-        "through 14 days ahead) or standing. A standing change from this door is not "
-        "applied until it is approved; the reply is pending. A pending result has not "
-        "happened yet. Out-of-range or inconsistent values are refused with the reason.",
-        "Change one of Jordan's schedule settings. scope is day (that date only, today "
-        "through 14 days ahead) or standing. A standing change from this door is not "
-        "applied. Out-of-range or inconsistent values are refused with the reason.",
-    ),
-    "undo_schedule_change": (
-        "Undo a schedule setting change. With no change_id, undo the latest change made "
-        "through this door in the last 24 hours. Restores the old value and logs a new change.",
-    ),
-}
+def envelope(*, ok, kind, ref=None, message=None, data=None, alerts=None,
+             fallback_text=None, error=None):
+    return {"v": 1, "ok": ok, "kind": kind, "ref": ref, "message": message,
+            "data": data if data is not None else {}, "alerts": alerts,
+            "fallback_text": fallback_text, "error": error}
+
+
+def fail(code, msg, step, *, data=None, ref=None):
+    return envelope(ok=False, kind="error", ref=ref, message=None,
+                    data=data if data is not None else {},
+                    error={"code": code, "msg": msg, "step": step})
+
+
+def ok_reply(kind, data, *, ref=None, message=None, alerts=None, fallback_text=None):
+    return envelope(ok=True, kind=kind, ref=ref, message=message, data=data,
+                    alerts=alerts, fallback_text=fallback_text, error=None)
+
+
+def register(actions, seed_rows=(), old_descriptions=None):
+    """Add a part's actions and seed rows (called by rivia_places / rivia_sched when they load)."""
+    ACTIONS.update(actions)
+    for row in seed_rows:
+        SEED[row["name"]] = row
+    for name, texts in (old_descriptions or {}).items():
+        OLD_DESCRIPTIONS[name] = tuple(texts)
+
+
+def _now_iso():
+    return datetime.now(TZ).replace(microsecond=0).isoformat()
+
 
 _installed: set[str] = set()
 
 
 def append_fixed_lines(description, action):
-    parts = [description.strip(), sched.FAIL_RULE]
-    info = sched.ACTIONS.get(action) or {}
+    parts = [description.strip(), FAIL_RULE]
+    info = ACTIONS.get(action) or {}
     if info.get("time_bearing"):
-        parts.append("Say times exactly as their spoken value, never work one out, "
-                     "say every must_say fact, offer decisions_for_jordan and never pick one.")
-    if action in ("sched.change_setting", "sched.write_day"):
-        line = sched.PENDING_LINE
+        parts.append(TIME_LINE)
+    if info.get("pending_line"):
+        line = PENDING_LINE
         blob = " ".join(parts)
         if line.lower() not in blob.lower():
             parts.append(line)
@@ -90,8 +94,8 @@ def ensure_schema(con):
 
 
 def seed_tools(con):
-    now = rp.iso(rp.now_s())
-    for row in SEED:
+    now = _now_iso()
+    for row in SEED.values():
         con.execute(
             "insert or ignore into tools(name, door, action, preset, description, model, enabled, updated) "
             "values(?,?,?,?,?,?,?,?)",
@@ -106,10 +110,9 @@ def seed_tools(con):
 
 
 def open_db():
-    con = rp.db_open()
-    ensure_schema(con)
+    """core.db (tools + calls), migrated once from scheduler.db, with the seed rows filled in."""
+    con = store.connect("core", SCHEMA, migrate=MIGRATE)
     seed_tools(con)
-    sched.ensure_store(con)
     return con
 
 
@@ -162,7 +165,7 @@ def log_call(door, tool, action, ok, code, ms):
     try:
         con.execute(
             "insert into calls(ts, door, tool, action, ok, code, ms) values(?,?,?,?,?,?,?)",
-            (rp.iso(rp.now_s()), door, tool, action, 1 if ok else 0, code, int(ms)),
+            (_now_iso(), door, tool, action, 1 if ok else 0, code, int(ms)),
         )
         con.execute(
             "delete from calls where rowid not in (select rowid from calls order by rowid desc limit ?)",
@@ -173,7 +176,7 @@ def log_call(door, tool, action, ok, code, ms):
 
 
 def _transforms(action, preset):
-    info = sched.ACTIONS[action]
+    info = ACTIONS[action]
     out = {}
     for py, pub in info["py_params"].items():
         if pub in (preset or {}):
@@ -186,9 +189,9 @@ def _transforms(action, preset):
 
 def tool_from_row(row):
     action = row["action"]
-    if action not in sched.ACTIONS:
+    if action not in ACTIONS:
         raise KeyError("unknown action: %s" % action)
-    info = sched.ACTIONS[action]
+    info = ACTIONS[action]
     preset = row["preset"]
     if isinstance(preset, str):
         preset = json.loads(preset or "{}")
@@ -258,11 +261,9 @@ def install_on(mcp, door):
     """Build row tools for this door and add them to the FastMCP server. Idempotent per door."""
     if door in _installed:
         return
-    # Selftest is checked on every action; running it here fills the cache and meta.
-    sched.selftest_ok()
     for row in load_rows(door=door, enabled_only=True):
-        if row["action"] not in sched.ACTIONS:
-            continue
+        if row["action"] not in ACTIONS:
+            continue  # its part did not load (for example scheduling); the rest still installs
         t = _wrap_logged(tool_from_row(row), row["door"], row["name"], row["action"])
         mcp.add_tool(t)
     _installed.add(door)

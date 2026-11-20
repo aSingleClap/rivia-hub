@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 
 import rivia_planner as rp
+import rivia_store as store
 from rivia_planner import *  # noqa: F401,F403
 from rivia_planner import _UNSET  # noqa: F401
 
@@ -354,14 +355,14 @@ def run():
 
     def in_tmp(fn):
         def inner():
-            old, old_places = rp.RIVIA_DIR, rp.PLACES_FILE
+            old, old_places, old_store = rp.RIVIA_DIR, rp.PLACES_FILE, store.RIVIA_DIR
             d = tempfile.mkdtemp()
-            rp.RIVIA_DIR = d
+            rp.RIVIA_DIR = store.RIVIA_DIR = d  # every DB (places.db, ...) and places.json follow it
             rp.PLACES_FILE = os.path.join(d, 'places.json')  # never the real pins
             try:
                 return fn(d)
             finally:
-                rp.RIVIA_DIR, rp.PLACES_FILE = old, old_places
+                rp.RIVIA_DIR, rp.PLACES_FILE, store.RIVIA_DIR = old, old_places, old_store
                 shutil.rmtree(d, ignore_errors=True)
         return inner
 

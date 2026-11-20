@@ -135,11 +135,19 @@ for _ in range(100):
 ok(server.started, "test server started")
 BASE = "http://127.0.0.1:%d" % PORT
 
-# Bot token for the rest of the paths
-with ra.db() as c:
-    c.execute("insert or ignore into clients values(?,?,?,?)",
-              ("grok-test", '["https://www.cursor.com/agents/mcp/oauth/callback"]', "Grok Bot", time.time()))
-BOT = ra.issue_tokens("grok-test")["access_token"]
+# A token from the removed Grok bot door (another client id), as one might still exist in auth.db.
+def legacy_bot_token():
+    import jwt
+    now = int(time.time())
+    jti = secrets.token_urlsafe(16)
+    claims = {"iss": ra.ISSUER, "aud": ra.RESOURCE, "sub": "owner", "client_id": "grok-test", "jti": jti,
+              "iat": now, "exp": now + 3600, "kind": "access", "scope": ra.SCOPE}
+    with ra.db() as c:
+        c.execute("insert into tokens values(?,?,?,?,0)", (jti, "grok-test", "access", now + 3600))
+    return jwt.encode(claims, os.environ["RIVIA_JWT_KEY"], algorithm="HS256")
+
+
+BOT = legacy_bot_token()
 
 
 def raw_post(path, token, body=None, origin=None):
@@ -172,9 +180,11 @@ ok(status == 403 and b"wrong_door" in body, "using the app token on the admin do
 status, _h, body = raw_post("/app/mcp", ADMIN2, tools_list_body())
 ok(status == 403 and b"wrong_door" in body, "using the admin token on the app door is 403 wrong_door")
 status, _h, body = raw_post("/mcp", ADMIN2, tools_list_body())
-ok(status == 403 and b"wrong_door" in body, "using the admin token on the bot door is 403 wrong_door")
+ok(status == 404, "the bot door /mcp is gone (404)")
 status, _h, body = raw_post("/admin/mcp", BOT, tools_list_body())
-ok(status == 403 and b"wrong_door" in body, "using a bot token on the admin door is 403 wrong_door")
+ok(status == 403 and b"wrong_door" in body, "an old bot token is 403 wrong_door on the admin door")
+status, _h, body = raw_post("/app/mcp", BOT, tools_list_body())
+ok(status == 403 and b"wrong_door" in body, "an old bot token is 403 wrong_door on the app door")
 
 # The revoked first admin token is rejected on /admin (file + jti)
 status, _h, _body = raw_post("/admin/mcp", ADMIN, tools_list_body())
@@ -257,10 +267,13 @@ async def call(url, token, tool, args):
 
 
 async def main():
-    A, B, D = BASE + "/app/mcp", BASE + "/mcp", BASE + "/admin/mcp"
-    at, bt, dt = await listed(A, APP), await listed(B, BOT), await listed(D, ADMIN2)
+    A, D = BASE + "/app/mcp", BASE + "/admin/mcp"
+    at, dt = await listed(A, APP), await listed(D, ADMIN2)
     for name in admin.ADMIN_TOOLS:
-        ok(name not in at and name not in bt, "admin tool %s is off the app and bot doors" % name)
+        if name in admin.READ_ONLY_APP_TOOLS:
+            ok(name in at, "read-only %s is also on the app door" % name)
+        else:
+            ok(name not in at, "admin tool %s is off the app door" % name)
         ok(name in dt, "admin door lists %s" % name)
 
     st = await call(D, ADMIN2, "hub_status", {})

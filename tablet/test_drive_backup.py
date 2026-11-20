@@ -105,14 +105,20 @@ class FakeGoogle:
         else:
             return 405, {"error": "method"}
         modified = self._modified()
+        name = g.DRIVE_BACKUP_NAME
+        try:  # the multipart body starts with the JSON metadata part (name, mimeType)
+            meta = (body or b"").split(b"\r\n\r\n", 1)[1].split(b"\r\n", 1)[0]
+            name = json.loads(meta.decode()).get("name") or name
+        except Exception:  # noqa: BLE001
+            pass
         rec = {
             "id": file_id,
-            "name": g.DRIVE_BACKUP_NAME,
+            "name": name,
             "modifiedTime": modified,
             "bytes": len(body or b""),
         }
         self.files[file_id] = rec
-        self.uploads.append({"method": method, "id": file_id, "modifiedTime": modified})
+        self.uploads.append({"method": method, "id": file_id, "name": name, "modifiedTime": modified})
         return 200, {"id": file_id, "name": rec["name"], "modifiedTime": modified}
 
 
@@ -234,92 +240,84 @@ ok(saved["refresh_token"] == "refresh-good" and g.SCOPE_DRIVE_FILE not in (saved
 
 # ── with all three scopes, backup creates one Drive file even with 0 rides ──
 save_token(g.SCOPE_ALL)
+# The single Drive file from before the core split (rivia-scheduler.db) is reused for scheduler.db.
+fake.files["legacy-file"] = {"id": "legacy-file", "name": g.DRIVE_BACKUP_NAME, "modifiedTime": "", "bytes": 0}
+g._meta_set("drive_file_id", "legacy-file")
 first = g.run_drive_backup()
 ok(first["ok"] is True and first["uploaded"] is True, "first backup uploads")
 ok(first.get("rides") == 0, "first backup after start-fresh has 0 rides")
-fid = first["drive_file_id"]
-ok(fid and fid in fake.files, "Drive created a file and we stored its id")
-ok(len(fake.uploads) == 1 and fake.uploads[0]["method"] == "POST",
-   "the first upload is a create (POST)")
-con = rp.db_open()
-try:
-    stored = rp.get_meta(con, "drive_file_id")
-finally:
-    con.close()
-ok(stored == fid, "drive_file_id is stored in planner meta")
+by_db = {f["db"]: f for f in first["files"]}
+ok(set(by_db) == {"places", "scheduler", "approvals", "core"},
+   "every part's DB is backed up: places, scheduler, approvals, core")
+ok({u["name"] for u in fake.uploads} == {"rivia-places.db", "rivia-scheduler.db", "rivia-approvals.db", "rivia-core.db"},
+   "each DB goes to its own Drive file")
+ok(by_db["scheduler"]["drive_file_id"] == "legacy-file"
+   and [u["method"] for u in fake.uploads if u["name"] == "rivia-scheduler.db"] == ["PATCH"],
+   "scheduler.db updates the Drive file from before the split")
+ok(sorted(u["method"] for u in fake.uploads if u["name"] != "rivia-scheduler.db") == ["POST"] * 3,
+   "the three new DBs are created (POST)")
+fid = by_db["places"]["drive_file_id"]
+ok(g._meta_get("drive_file_id.places") == fid and fid in fake.files, "the places file id is stored in scheduler meta")
+n_first = len(fake.uploads)
 
-# run again with no change: no new rides, no upload
+# run again with no change: nothing uploads
 again = g.run_drive_backup()
 ok(again["ok"] is True and again["uploaded"] is False, "second backup does not upload")
 ok("no new rides" in (again.get("message") or again.get("reason") or "").lower(),
-   "second backup says no new rides")
-ok(len(fake.uploads) == 1, "no second Drive request when nothing changed")
+   "second backup says nothing new")
+ok(len(fake.uploads) == n_first, "no Drive request when nothing changed")
 
-# log one test ride; same file id gets a newer modified time
+# log one test ride: only places.db goes up, to the same file, with a newer modified time
 logged = rp.cmd_log_ride(ride("test-ride-1"))
 ok(logged["stored"] is True, "logged one test ride in the throwaway database")
 ok(sched.cmd_rides()["rides"] == 1, "ride count is 1 after the test ride")
 updated = g.run_drive_backup()
 ok(updated["ok"] is True and updated["uploaded"] is True, "backup after a new ride uploads")
-ok(updated["drive_file_id"] == fid, "the update uses the same Drive file id")
-ok(len(fake.uploads) == 2 and fake.uploads[1]["method"] == "PATCH",
-   "the second upload updates the existing file (PATCH)")
-ok(updated["modifiedTime"] != first["modifiedTime"]
-   and updated["modifiedTime"] > first["modifiedTime"],
-   "the same file id has a newer modified time")
+ok([f["db"] for f in updated["files"]] == ["places"], "only places.db changed, so only it is uploaded")
+ok(updated["files"][0]["drive_file_id"] == fid and fake.uploads[-1]["method"] == "PATCH",
+   "the update uses the same Drive file id (PATCH)")
+ok(updated["files"][0]["modifiedTime"] > by_db["places"]["modifiedTime"], "the same file id has a newer modified time")
 
-# ── settings / changes-table growth forces an upload with no new rides ──
-# Mark the current upload, then insert a changes row without logging a ride.
-marked_uploads = len(fake.uploads)
-import rivia_sched as _sched
-con = rp.db_open()
+# ── a new change in approvals.db uploads approvals.db only ──
+import rivia_approvals as _approvals
+con = _approvals.db_open()
 try:
-    _sched.ensure_store(con)
     con.execute(
-        "insert into changes(change_id, created, door, key, new, status) "
-        "values (?,?,?,?,?,?)",
+        "insert into changes(change_id, created, door, key, new, status) values (?,?,?,?,?,?)",
         ("chg-1", "2026-11-15T10:00:00-05:00", "app", "workout_minutes", "90", "applied"),
     )
-    con.commit()
 finally:
     con.close()
 forced = g.run_drive_backup()
-ok(forced["ok"] is True and forced["uploaded"] is True,
-   "a new changes-table row forces an upload even with no new rides")
-ok(forced["drive_file_id"] == fid, "the forced upload still updates the same file")
-ok(len(fake.uploads) == marked_uploads + 1, "changes-table growth caused one more Drive upload")
-
-# force again with no further change should say no new rides (uploaded_change + stamp match)
+ok(forced["ok"] is True and [f["db"] for f in forced["files"]] == ["approvals"],
+   "a new changes row uploads approvals.db, nothing else")
 stable = g.run_drive_backup()
-ok(stable["ok"] is True and stable["uploaded"] is False
-   and "no new rides" in (stable.get("message") or "").lower(),
-   "after the forced upload, a quiet run is again a no-op")
+ok(stable["ok"] is True and stable["uploaded"] is False, "after that, a quiet run is again a no-op")
+ok(g.run_drive_backup(force=True)["uploaded"] is True, "--force uploads anyway")
 
-# ── a fresh database (no start-fresh) is restore_first, not a crash ──
+# ── a fresh places.db (no start-fresh) is restore_first, not a crash ──
 os.remove(rp.db_file())
-ok(sched.cmd_rides()["fresh"] is True, "wiped database is fresh again")
+ok(sched.cmd_rides()["fresh"] is True, "wiped places.db is fresh again")
 save_token(g.SCOPE_ALL)
 blocked = g.run_drive_backup()
 ok(blocked["ok"] is False and blocked["error"]["code"] == "restore_first",
-   "backup on a fresh database is restore_first")
+   "backup on a fresh places.db is restore_first")
 ok(blocked.get("uploaded") is False, "a refused fresh-db backup does not upload")
 
 # ── CLI: rivia sched backup ──
-# Unlock again and push once from the wrapper.
 sched.cmd_start_fresh()
 save_token(g.SCOPE_ALL)
-# After wipe + start-fresh, drive_file_id is gone; this creates a new file.
 cli = sh_sched("backup")
 ok(cli.returncode == 0, "rivia sched backup exits 0: %s" % cli.stderr)
 cli_out = json.loads(cli.stdout)
-ok(cli_out["ok"] is True and cli_out["uploaded"] is True and cli_out.get("drive_file_id"),
-   "rivia sched backup uploads on a newly unlocked database")
+ok(cli_out["ok"] is True and cli_out["uploaded"] is True and "places" in [f["db"] for f in cli_out["files"]],
+   "rivia sched backup uploads the newly unlocked places.db")
 cli2 = sh_sched("backup")
 ok(cli2.returncode == 0, "rivia sched backup again exits 0")
 cli2_out = json.loads(cli2.stdout)
 ok(cli2_out["ok"] is True and cli2_out["uploaded"] is False
    and "no new rides" in (cli2_out.get("message") or "").lower(),
-   "rivia sched backup with no change reports no new rides")
+   "rivia sched backup with no change reports nothing new")
 
 # rivia.sh routes the command
 sh = open(os.path.join(HERE, "rivia.sh")).read()

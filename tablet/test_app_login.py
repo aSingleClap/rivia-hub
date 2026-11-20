@@ -156,7 +156,13 @@ def call(app, method, path, *, js=None, raw=None, headers=None, reset=True):
     return R(out["status"], out["headers"], out["body"])
 
 
-APP = ra.build_app()
+async def door_stub(scope, receive, send):
+    """Stands in for a door's MCP app: answers 200 once the gate let the request through."""
+    from starlette.responses import JSONResponse
+    await JSONResponse({"ok": True, "path": scope["path"]})(scope, receive, send)
+
+
+APP = ra.build_app(app_mcp=door_stub, admin_mcp=door_stub)
 LOG = io.StringIO()
 
 
@@ -227,7 +233,7 @@ ok(claims and claims["client_id"] == ra.APP_CLIENT, "app_token is a real app-doo
 ok(ra.decode(old_app, "access") is None, "the old app token is revoked, as rivia token does")
 ok(call(APP, "POST", "/app/mcp", headers={"authorization": "Bearer " + body["app_token"]}).status == 200,
    "the new app token opens /app/mcp")
-ok(call(APP, "POST", "/mcp", headers={"authorization": "Bearer " + body["app_token"]}).status == 403,
+ok(call(APP, "POST", "/admin/mcp", headers={"authorization": "Bearer " + body["app_token"]}).status == 403,
    "and only the app door")
 SECRETS_SEEN.append(body["app_token"])
 refreshed = gcal.refresh_access(gcal.load_tokens())
@@ -283,7 +289,7 @@ ok("access-control-allow-origin" not in r.headers, "no CORS headers on a sign-in
 r = call(APP, "OPTIONS", "/app/mcp", headers=pre)
 ok(r.headers.get("access-control-allow-origin") == HUB, "CORS still works for the hub's own paths")
 os.environ.pop("RIVIA_CORS_ORIGINS")
-plain = ra.build_app()
+plain = ra.build_app(app_mcp=door_stub, admin_mcp=door_stub)
 r = login(code("bad"), app=plain)
 ok(r.status == 403, "with CORS off, /app/login works the same")
 
@@ -295,8 +301,10 @@ ok(not leaks, "the log holds no code, token, secret or email")
 
 # ── the bot sign-in, rivia token and google-login are untouched ──
 ok(ra.mint_door_token("app")["client_id"] == ra.APP_CLIENT, "rivia token still mints app tokens")
-ok(call(APP, "GET", "/authorize").status == 400 and call(APP, "GET", "/health").status == 200,
-   "the bot OAuth endpoints and /health are still open")
+ok(call(APP, "GET", "/health").status == 200, "/health is still open")
+ok(all(call(APP, m, p).status == 404 for m, p in (("GET", "/authorize"), ("POST", "/token"), ("POST", "/register"),
+                                               ("GET", "/.well-known/oauth-authorization-server"), ("POST", "/mcp"))),
+   "the removed bot door and its OAuth endpoints answer 404")
 ok(gcal.login_scope() == gcal.SCOPE_ALL, "google-login still asks for the same scopes")
 
 httpd.shutdown()

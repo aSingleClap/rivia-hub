@@ -1,17 +1,21 @@
-# rivia_admin.py: fixed tools on the /admin MCP door. Not rows, not renameable,
-# never registered on the bot or app doors. save_tool / delete_tool / test_tool
-# come later. list_changes / approve_change / reject_change / undo_change are
-# the approval queue.
+# rivia_admin.py (core): fixed tools on the /admin MCP door. Not rows, not renameable.
+# hub_status, list_tools and list_calls are read-only and are also put on the app door
+# (install_read_only_on); set_setting, restart_server and the approval tools stay admin-only.
+# Scheduling is imported only inside the tools that need it, so the hub keeps working (and can
+# still approve place changes) when scheduling failed to load.
 import os
 import signal
+import sqlite3
 import threading
 from datetime import datetime
-from pathlib import Path
 
-import rivia_gcal as gcal
-import rivia_planner as rp
-import rivia_sched as sched
+import rivia_approvals as approvals
+import rivia_battery as battery
+import rivia_google as google
+import rivia_settings as settings
+import rivia_store as store
 import rivia_tools as tools
+from rivia_tools import fail, ok_reply
 
 ADMIN_TOOLS = (
     "hub_status",
@@ -26,35 +30,35 @@ ADMIN_TOOLS = (
     "reject_change",
     "undo_change",
 )
+READ_ONLY_APP_TOOLS = ("hub_status", "list_tools", "list_calls")
 
 # Tests replace this so calling restart_server does not kill the test process.
 # The live tool starts a short timer, then SIGTERM, and the watchdog in rivia.sh
 # brings the server back (Yrden expects /health 200 in about 90 s).
 _restart_impl = None
 
-PS = Path("/sys/class/power_supply/battery")
+
+def _sched():
+    """The scheduling module, or None if it is not running."""
+    try:
+        import rivia_sched
+        return rivia_sched
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _battery():
-    try:
-        level = int((PS / "capacity").read_text().strip())
-    except (OSError, ValueError):
-        return None
-    try:
-        status = (PS / "status").read_text().strip()
-    except OSError:
-        status = "unknown"
-    return {"battery_percent": level, "status": status}
+    return battery.read_battery()
 
 
 def _google_status():
     try:
-        tokens = gcal.load_tokens()
+        tokens = google.load_tokens()
     except Exception:
         tokens = None
     if not tokens:
         return {"signed_in": False, "scopes_complete": False}
-    payload = gcal.scopes_payload(tokens=tokens)
+    payload = google.scopes_payload(tokens=tokens)
     return {
         "signed_in": True,
         "scopes_complete": bool(payload.get("scopes_complete")),
@@ -62,30 +66,37 @@ def _google_status():
     }
 
 
-def _backup_status():
-    out = {"last_backup": None}
+def _scheduler_meta(key):
+    path = store.scheduler_db_path()
+    if not os.path.exists(path):
+        return None
     try:
-        con = rp.db_open()
+        con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
         try:
-            out["last_backup"] = rp.get_meta(con, "drive_uploaded_changes")
+            row = con.execute("select value from meta where key=?", (key,)).fetchone()
+            return row[0] if row else None
         finally:
             con.close()
-    except Exception:
-        pass
-    return out
+    except sqlite3.Error:
+        return None
+
+
+def _backup_status():
+    return {"last_backup": _scheduler_meta("drive_uploaded_at") or _scheduler_meta("drive_uploaded_changes")}
 
 
 def _selftest_status():
+    sched = _sched()
     try:
-        ok = sched.selftest_ok()
+        ok = bool(sched and sched.selftest_ok())
     except Exception:
         ok = False
-    return {"selftest_ok": bool(ok)}
+    return {"selftest_ok": ok, "scheduling": "running" if sched else "unavailable"}
 
 
 def hub_status() -> dict:
     """Tablet hub status: clock, selftest, Google sign-in, last backup, battery."""
-    now = datetime.now(gcal.TZ)
+    now = datetime.now(google.TZ)
     data = {
         "ok": True,
         "time": now.strftime("%Y-%m-%d %H:%M"),
@@ -94,7 +105,7 @@ def hub_status() -> dict:
     data.update(_selftest_status())
     data.update(_google_status())
     data.update(_backup_status())
-    data.update(gcal.clock_status())
+    data.update(google.clock_status())
     batt = _battery()
     if batt:
         data["battery"] = batt
@@ -104,7 +115,7 @@ def hub_status() -> dict:
 def list_actions() -> dict:
     """The scheduler action catalog (name, doors, description). Admin functions are not actions."""
     rows = []
-    for name, info in sched.ACTIONS.items():
+    for name, info in tools.ACTIONS.items():
         rows.append({
             "action": name,
             "doors": list(info.get("doors") or ()),
@@ -134,42 +145,32 @@ def list_calls(limit: int = 100) -> dict:
     return {"ok": True, "calls": tools.list_call_rows(limit=limit_n)}
 
 
+def _settings_fail(err):
+    data = dict(err.extra) if getattr(err, "extra", None) else {}
+    return fail(err.code, str(err), getattr(err, "step", "settings"), data=data)
+
+
 def get_settings(group: str = "all", day: str | None = None) -> dict:
-    """Current schedule settings, including pins. group defaults to all."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
+    """Current settings, including pins. group defaults to all."""
     try:
-        data = sched.get_settings_sync(group=group or "all", day=day)
-        return sched.ok_reply("settings", data)
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
+        return ok_reply("settings", settings.get_settings(group=group or "all", day=day))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
 
 
 def set_setting(key: str, value: str | int | float | dict, scope: str = "standing",
                 day: str | None = None, reason: str | None = None) -> dict:
     """Apply a setting now, including standing values and pins. This door applies at once."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
     try:
-        data = sched.change_setting_sync(
-            key, value, scope, day=day, reason=reason, door="admin",
-        )
+        data = settings.change_setting(key, value, scope, day=day, reason=reason, door="admin")
         kind = "change" if data.get("status") == "applied" else "pending"
-        return sched.ok_reply(kind, data, ref=data.get("change_id"))
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
+        return ok_reply(kind, data, ref=data.get("change_id"))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
 
 
 def _default_restart():
@@ -195,73 +196,55 @@ def restart_server() -> dict:
 
 def list_changes(status: str | None = None, limit: int = 100) -> dict:
     """Pending and recent setting changes, including who asked (app, admin, or system)."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
     try:
-        data = sched.list_changes_sync(status=status, limit=limit)
-        return sched.ok_reply("changes", data)
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
+        return ok_reply("changes", approvals.list_changes_sync(status=status, limit=limit))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
 
 
 def approve_change(change_id: str) -> dict:
     """Re-run every check and apply a pending change once. A second approve is refused."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
     try:
-        data = sched.approve_change_sync(change_id)
+        data = approvals.approve_change_sync(change_id)
         kind = "write" if data.get("key") == "write_day" or data.get("kind") == "write_day" else "change"
-        return sched.ok_reply(kind, data, ref=data.get("change_id") or data.get("day"))
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
-    except gcal.GcalError as e:
-        return sched.fail(e.code, str(e), e.step or "calendar")
+        return ok_reply(kind, data, ref=data.get("change_id") or data.get("day"))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
+    except google.GcalError as e:
+        return fail(e.code, str(e), e.step or "calendar")
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
 
 
 def reject_change(change_id: str) -> dict:
     """Reject a pending change. The plan is left unchanged."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
     try:
-        data = sched.reject_change_sync(change_id)
-        return sched.ok_reply("change", data, ref=data.get("change_id"))
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
+        data = approvals.reject_change_sync(change_id)
+        return ok_reply("change", data, ref=data.get("change_id"))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
 
 
 def undo_change(change_id: str | None = None) -> dict:
     """Undo an applied change. Standing restores from this door take effect at once."""
-    if not sched.selftest_ok():
-        return sched.fail(
-            "selftest_failed",
-            "Planner selftest failed at startup. Scheduler actions are blocked until it passes.",
-            "planner",
-        )
     try:
-        data = sched.undo_change_sync(change_id=change_id, door="admin")
-        return sched.ok_reply("undo", data, ref=data.get("change_id"))
-    except sched.SettingsError as e:
-        return sched._settings_fail(e)
+        data = approvals.undo_change_sync(change_id=change_id, door="admin")
+        return ok_reply("undo", data, ref=data.get("change_id"))
+    except approvals.SettingsError as e:
+        return _settings_fail(e)
     except Exception as e:  # noqa: BLE001
-        return sched.fail("internal", repr(e), "settings")
+        return fail("internal", repr(e), "settings")
+
+
+def install_read_only_on(mcp):
+    """hub_status, list_tools and list_calls on another door (the app door), read only."""
+    mcp.tool()(hub_status)
+    mcp.tool()(list_tools)
+    mcp.tool()(list_calls)
 
 
 def install_on(mcp):
