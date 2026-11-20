@@ -62,7 +62,7 @@ def clear_notices():
 
 
 def clear_meta(*keys):
-    con = rp.db_open()
+    con = gcal._sched_db()  # Google bookkeeping lives in scheduler.db
     try:
         for k in keys:
             con.execute("delete from meta where key=?", (k,))

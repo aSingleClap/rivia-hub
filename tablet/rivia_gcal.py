@@ -34,15 +34,49 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Empty, Queue
 from zoneinfo import ZoneInfo
 
-TZ = ZoneInfo("America/New_York")
+from rivia_google import (  # noqa: F401  Google credentials and tokens (core); re-exported here
+    TZ,
+    SCOPE_READ,
+    SCOPE_CALENDAR_APP,
+    SCOPE_DRIVE_FILE,
+    SCOPES_WRITE,
+    SCOPE_ALL,
+    AUTH_URL,
+    TOKEN_URL,
+    HTTP_TIMEOUT,
+    CLOCK_GAP_S,
+    TOKEN_SKEW_S,
+    FIX_LOGIN,
+    FIX_RELOGIN,
+    GcalError,
+    auth_url,
+    token_url,
+    dot_dir,
+    token_path,
+    load_google_env,
+    client_creds,
+    pkce,
+    reset_clock,
+    note_clock,
+    clock_status,
+    web_client_creds,
+    creds_for,
+    scope_set,
+    granted_scopes,
+    has_scopes,
+    missing_scopes,
+    scopes_payload,
+    login_scope,
+    require_scopes,
+    fail_payload,
+    http_request,
+    exchange_code,
+    refresh_access,
+    load_tokens,
+    save_tokens,
+    access_token,
+)
 
-SCOPE_READ = "https://www.googleapis.com/auth/calendar.events.readonly"
-SCOPE_CALENDAR_APP = "https://www.googleapis.com/auth/calendar.app.created"
-SCOPE_DRIVE_FILE = "https://www.googleapis.com/auth/drive.file"
-SCOPES_WRITE = (SCOPE_READ, SCOPE_CALENDAR_APP, SCOPE_DRIVE_FILE)
-SCOPE_ALL = " ".join(SCOPES_WRITE)
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 RIVIA_CALENDAR_NAME = "Rivia"
@@ -50,33 +84,6 @@ META_RIVIA_ID = "gcal_rivia_id"
 DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 DRIVE_BACKUP_NAME = "rivia-scheduler.db"
 DRIVE_BACKUP_MIME = "application/octet-stream"
-HTTP_TIMEOUT = 10
-CLOCK_GAP_S = 120
-TOKEN_SKEW_S = 60
-
-FIX_LOGIN = "Google sign-in expired or was revoked. Run: rivia sched google-login"
-FIX_RELOGIN = (
-    "Google sign-in is missing Drive and calendar write scopes. "
-    "Run: rivia sched google-login --write"
-)
-
-
-class GcalError(Exception):
-    def __init__(self, code, msg, step="calendar", **extra):
-        super().__init__(msg)
-        self.code = code
-        self.step = step
-        self.extra = extra
-
-
-def auth_url():
-    return os.environ.get("RIVIA_GOOGLE_AUTH_URL", AUTH_URL)
-
-
-def token_url():
-    return os.environ.get("RIVIA_GOOGLE_TOKEN_URL", TOKEN_URL)
-
-
 def events_url():
     return os.environ.get("RIVIA_GOOGLE_EVENTS_URL", EVENTS_URL)
 
@@ -87,321 +94,6 @@ def drive_upload_url():
 
 def drive_backup_name():
     return (os.environ.get("RIVIA_DRIVE_BACKUP_NAME") or DRIVE_BACKUP_NAME).strip() or DRIVE_BACKUP_NAME
-
-
-def dot_dir():
-    override = os.environ.get("RIVIA_DOTDIR")
-    if override:
-        return override
-    return os.path.expanduser("~/.rivia")
-
-
-def token_path():
-    override = os.environ.get("RIVIA_GOOGLE_TOKEN_PATH")
-    if override:
-        return override
-    return os.path.join(dot_dir(), "google_token.json")
-
-
-def _parse_env_file(path, out):
-    try:
-        with open(path) as f:
-            lines = f.readlines()
-    except OSError:
-        return
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        k, v = k.strip(), v.strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-            v = v[1:-1]
-        if k.startswith("RIVIA_GOOGLE_") and k not in out:
-            out[k] = v
-
-
-def load_google_env():
-    """Fill RIVIA_GOOGLE_* from ~/.rivia/.env or ~/rivia/.env if they are not already set."""
-    if os.environ.get("RIVIA_GOOGLE_CLIENT_ID") and os.environ.get("RIVIA_GOOGLE_CLIENT_SECRET"):
-        return
-    found = {}
-    _parse_env_file(os.path.join(dot_dir(), ".env"), found)
-    _parse_env_file(os.path.expanduser(os.path.join(os.environ.get("RIVIA_DIR", "~/rivia"), ".env")), found)
-    for k, v in found.items():
-        os.environ.setdefault(k, v)
-
-
-def client_creds():
-    load_google_env()
-    cid = (os.environ.get("RIVIA_GOOGLE_CLIENT_ID") or "").strip()
-    sec = (os.environ.get("RIVIA_GOOGLE_CLIENT_SECRET") or "").strip()
-    if not cid or not sec:
-        raise GcalError(
-            "not_configured",
-            "Missing RIVIA_GOOGLE_CLIENT_ID or RIVIA_GOOGLE_CLIENT_SECRET. "
-            "Quen puts them in ~/.rivia/.env (never paste them in chat).",
-            step="input",
-        )
-    return cid, sec
-
-
-def pkce():
-    verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
-
-
-# Last observed clock gap (Google Date header minus local now), seconds, or None.
-_clock_gap_s = None
-
-
-def reset_clock():
-    global _clock_gap_s
-    _clock_gap_s = None
-
-
-def note_clock(date_header):
-    """Compare Google's Date header with the local clock. A gap over 2 minutes is reported in status."""
-    global _clock_gap_s
-    if not date_header:
-        return
-    try:
-        google_t = datetime.strptime(date_header.strip(), "%a, %d %b %Y %H:%M:%S GMT")
-        # HTTP dates are GMT
-        from datetime import timezone
-        google_s = google_t.replace(tzinfo=timezone.utc).timestamp()
-    except ValueError:
-        return
-    _clock_gap_s = google_s - time.time()
-
-
-def clock_status():
-    gap = _clock_gap_s
-    if gap is None:
-        return {"clock_gap_s": None, "clock_ok": True}
-    return {"clock_gap_s": int(round(gap)), "clock_ok": abs(gap) <= CLOCK_GAP_S}
-
-
-def scope_set(scope):
-    if not scope:
-        return set()
-    return set(str(scope).replace(",", " ").split())
-
-
-def granted_scopes(tokens=None):
-    if tokens is None:
-        try:
-            tokens = load_tokens()
-        except GcalError:
-            return set()
-    return scope_set(tokens.get("scope") or "")
-
-
-def has_scopes(*needed, tokens=None):
-    have = granted_scopes(tokens)
-    return set(needed) <= have
-
-
-def missing_scopes(*needed, tokens=None):
-    have = granted_scopes(tokens)
-    return [s for s in needed if s not in have]
-
-
-def scopes_payload(tokens=None):
-    """Granted OAuth scopes on the saved token. Safe if no token is present."""
-    if tokens is None:
-        try:
-            tokens = load_tokens()
-        except GcalError:
-            return {"scopes": [], "scopes_complete": False}
-    scopes = sorted(granted_scopes(tokens))
-    return {"scopes": scopes, "scopes_complete": has_scopes(*SCOPES_WRITE, tokens=tokens)}
-
-
-def login_scope():
-    """Scopes requested by rivia sched google-login (and google-login --write)."""
-    return SCOPE_ALL
-
-
-def require_scopes(*needed, tokens=None):
-    if missing_scopes(*needed, tokens=tokens):
-        raise GcalError("needs_relogin", FIX_RELOGIN, step="auth")
-
-
-def fail_payload(err: GcalError):
-    out = {"ok": False, "error": {"code": err.code, "msg": str(err), "step": err.step},
-           "status": clock_status()}
-    if err.extra:
-        out["error"].update(err.extra)
-    return out
-
-
-def _http(method, url, headers=None, data=None, timeout=HTTP_TIMEOUT):
-    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read()
-            note_clock(r.headers.get("Date"))
-            return r.status, dict(r.headers), body
-    except urllib.error.HTTPError as e:
-        body = e.read() if e.fp else b""
-        note_clock(e.headers.get("Date") if e.headers else None)
-        return e.code, dict(e.headers or {}), body
-
-
-def _is_timeout(exc):
-    if isinstance(exc, TimeoutError):
-        return True
-    if isinstance(exc, socket.timeout):
-        return True
-    if isinstance(exc, urllib.error.URLError):
-        reason = exc.reason
-        if isinstance(reason, (TimeoutError, socket.timeout)):
-            return True
-        if "timed out" in str(reason).lower():
-            return True
-    return False
-
-
-def http_request(method, url, headers=None, data=None, timeout=HTTP_TIMEOUT):
-    """One request, with a single retry on timeout or 5xx."""
-    last = None
-    for attempt in (1, 2):
-        try:
-            status, hdrs, body = _http(method, url, headers=headers, data=data, timeout=timeout)
-        except Exception as e:  # noqa: BLE001
-            last = e
-            if attempt == 1 and _is_timeout(e):
-                continue
-            raise GcalError("calendar_http", "Google request failed: %s" % e)
-        if status >= 500 and attempt == 1:
-            last = status
-            continue
-        return status, hdrs, body
-    if isinstance(last, int):
-        raise GcalError("calendar_http", "Google returned HTTP %s after a retry." % last)
-    raise GcalError("calendar_http", "Google request timed out after a retry.")
-
-
-def _token_error(body):
-    try:
-        data = json.loads(body.decode() if isinstance(body, (bytes, bytearray)) else body)
-    except ValueError:
-        data = {}
-    err = data.get("error")
-    if err == "invalid_grant":
-        raise GcalError("calendar_login_expired", FIX_LOGIN)
-    msg = data.get("error_description") or err or (body[:200] if body else "token request failed")
-    raise GcalError("calendar_token", "Google token request failed: %s" % msg)
-
-
-def exchange_code(code, verifier, redirect_uri):
-    cid, sec = client_creds()
-    payload = urllib.parse.urlencode({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": cid,
-        "client_secret": sec,
-        "code_verifier": verifier,
-    }).encode()
-    status, _, body = http_request("POST", token_url(),
-                                   headers={"Content-Type": "application/x-www-form-urlencoded"},
-                                   data=payload)
-    if status != 200:
-        _token_error(body)
-    data = json.loads(body.decode())
-    if not data.get("refresh_token"):
-        raise GcalError(
-            "no_refresh_token",
-            "Google did not return a refresh token. Revoke Rivia in Google Account "
-            "permissions and run: rivia sched google-login",
-        )
-    return data
-
-
-def refresh_access(tokens):
-    cid, sec = client_creds()
-    refresh = tokens.get("refresh_token")
-    if not refresh:
-        raise GcalError("calendar_login_expired", FIX_LOGIN)
-    payload = urllib.parse.urlencode({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh,
-        "client_id": cid,
-        "client_secret": sec,
-    }).encode()
-    status, _, body = http_request("POST", token_url(),
-                                   headers={"Content-Type": "application/x-www-form-urlencoded"},
-                                   data=payload)
-    if status != 200:
-        _token_error(body)
-    data = json.loads(body.decode())
-    tokens = dict(tokens)
-    tokens["access_token"] = data["access_token"]
-    expires_in = int(data.get("expires_in") or 3600)
-    tokens["expiry"] = int(time.time()) + expires_in
-    if data.get("refresh_token"):
-        tokens["refresh_token"] = data["refresh_token"]
-    if data.get("scope"):
-        tokens["scope"] = data["scope"]
-    save_tokens(tokens)
-    return tokens
-
-
-def load_tokens():
-    path = token_path()
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        raise GcalError("calendar_login_expired",
-                        "No Google token yet. Run: rivia sched google-login")
-    except (OSError, ValueError) as e:
-        raise GcalError("calendar_token", "Could not read %s: %s" % (path, e))
-    if not isinstance(data, dict) or not data.get("refresh_token"):
-        raise GcalError("calendar_login_expired", FIX_LOGIN)
-    return data
-
-
-def save_tokens(tokens):
-    path = token_path()
-    os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(os.path.abspath(path)), 0o700)
-    tmp = path + ".tmp"
-    payload = {
-        "refresh_token": tokens["refresh_token"],
-        "access_token": tokens.get("access_token") or "",
-        "expiry": int(tokens.get("expiry") or 0),
-        "scope": tokens.get("scope") or SCOPE_READ,
-        "token_type": tokens.get("token_type") or "Bearer",
-    }
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=1)
-            f.write("\n")
-    except Exception:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
-    return path
-
-
-def access_token():
-    tokens = load_tokens()
-    expiry = int(tokens.get("expiry") or 0)
-    if tokens.get("access_token") and expiry > time.time() + TOKEN_SKEW_S:
-        return tokens["access_token"], tokens
-    tokens = refresh_access(tokens)
-    return tokens["access_token"], tokens
-
 
 WEEKDAYS = {
     "monday": 0, "mon": 0,
@@ -699,14 +391,13 @@ def record_calendar_auth_failure(err, now=None):
         return {"first_today": False, "reason": "not_auth"}
     day = (now or datetime.now(TZ)).date().isoformat()
     try:
-        import rivia_planner as rp
-        con = rp.db_open()
+        con = _sched_db()
         try:
-            last = rp.get_meta(con, NOTICE_DAY_KEY)
+            last = _store().get_meta(con, NOTICE_DAY_KEY)
             if last == day:
                 return {"first_today": False, "reason": "already_today", "day": day}
-            rp.set_meta(con, NOTICE_DAY_KEY, day)
-            rp.set_meta(con, "gcal_login_notice", FIX_LOGIN)
+            _store().set_meta(con, NOTICE_DAY_KEY, day)
+            _store().set_meta(con, "gcal_login_notice", FIX_LOGIN)
             return {"first_today": True, "reason": "recorded", "day": day, "fix": FIX_LOGIN}
         finally:
             con.close()
@@ -782,12 +473,22 @@ def maybe_notify_missing_scopes(now=None):
                 "notify": sent, "fix": FIX_RELOGIN}
 
 
+def _store():
+    import rivia_store
+    return rivia_store
+
+
+def _sched_db():
+    """scheduler.db, where scheduling keeps its Google bookkeeping (meta)."""
+    import rivia_settings
+    return _store().connect("scheduler", rivia_settings.SETTINGS_SCHEMA)
+
+
 def _meta_get(key):
     try:
-        import rivia_planner as rp
-        con = rp.db_open()
+        con = _sched_db()
         try:
-            return rp.get_meta(con, key)
+            return _store().get_meta(con, key)
         finally:
             con.close()
     except Exception:  # noqa: BLE001
@@ -795,10 +496,9 @@ def _meta_get(key):
 
 
 def _meta_set(key, value):
-    import rivia_planner as rp
-    con = rp.db_open()
+    con = _sched_db()
     try:
-        rp.set_meta(con, key, value)
+        _store().set_meta(con, key, value)
     finally:
         con.close()
 
@@ -1081,45 +781,67 @@ def upload_scheduler_db(path, *, file_id=None, name=None, token=None):
     return data
 
 
-def _changes_stamp(con):
-    """How big the settings changes table is, or 0:0 if it isn't there yet."""
-    try:
-        row = con.execute("select count(*), coalesce(max(rowid), 0) from changes").fetchone()
-        return "%s:%s" % (row[0], row[1])
-    except Exception:  # noqa: BLE001
-        return "0:0"
+# Drive backup (core split): each part's DB goes to its own Drive file. A DB is uploaded when
+# its content changed since its last upload (a hash of its rows; the backup's own bookkeeping
+# rows, meta keys drive_*, are left out so recording an upload never causes another one).
+BACKUP_DBS = ("places", "scheduler", "approvals", "core")
+DRIVE_NAMES = {"places": "rivia-places.db", "scheduler": DRIVE_BACKUP_NAME,
+               "approvals": "rivia-approvals.db", "core": "rivia-core.db"}
 
 
-def _drive_meta_get(key, default=None):
-    import rivia_planner as rp
-    con = rp.db_open()
-    try:
-        value = rp.get_meta(con, key, default)
-        return value, _changes_stamp(con)
-    finally:
-        con.close()
+def _open_part_db(name):
+    if name == "places":
+        import rivia_places
+        return rivia_places.db_open()
+    if name == "approvals":
+        import rivia_approvals
+        return rivia_approvals.db_open()
+    if name == "core":
+        import rivia_tools
+        return rivia_tools.open_db()
+    return _sched_db()
 
 
-def _drive_meta_set(**pairs):
-    import rivia_planner as rp
-    con = rp.db_open()
-    try:
-        for key, value in pairs.items():
-            rp.set_meta(con, key, value)
-    finally:
-        con.close()
+def _content_hash(con):
+    h = hashlib.sha256()
+    for line in con.iterdump():
+        if line.startswith("INSERT INTO \"meta\" VALUES('drive_"):
+            continue
+        h.update(line.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def _snapshot(con, name):
+    """A consistent copy of one DB in ~/rivia/backup/, even if a write is in progress."""
+    import sqlite3
+    folder = os.path.join(_store().rivia_dir(), "backup")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, name + ".db")
+    tmp = path + ".tmp"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    dst = sqlite3.connect(tmp)
+    con.backup(dst)
+    dst.close()
+    os.replace(tmp, path)
+    return path
+
+
+def _drive_file_id(scon, name):
+    fid = _store().get_meta(scon, "drive_file_id." + name)
+    if not fid and name == "scheduler":
+        fid = _store().get_meta(scon, "drive_file_id")  # the single Drive file from before the split
+    return fid or None
 
 
 def run_drive_backup(*, force=False):
-    """Back up scheduler.db to Drive when rides or settings changes grew.
-
-    After a successful upload, stores drive_file_id in planner meta and later
-    updates that same file. An existing read-only token is left in place;
-    missing drive.file returns needs_relogin instead of crashing. Never
-    talks to the real Google APIs unless a token with drive.file is present.
-    """
-    import rivia_planner as rp
-    out = {"ok": True, "uploaded": False, "written": False}
+    """Back up every part's DB (places, scheduler, approvals, core) to Drive, each to its own
+    file, when it changed since its last upload. A new, empty places.db is never uploaded over
+    the Drive copy (restore_first). An existing read-only token is left in place; missing
+    drive.file returns needs_relogin instead of crashing."""
+    import rivia_places
+    out = {"ok": True, "uploaded": False, "written": False, "files": []}
     try:
         try:
             tokens = load_tokens()
@@ -1127,48 +849,43 @@ def run_drive_backup(*, force=False):
             if e.code in AUTH_FAIL_CODES:
                 maybe_notify_signin_expired(e)
             raise
-        # Settings changes do not bump the ride counter; force the planner
-        # backup when the changes table grew since the last Drive upload.
-        last_changes = None
-        stamp = "0:0"
+        pcon = rivia_places.db_open()
         try:
-            last_changes, stamp = _drive_meta_get("drive_uploaded_changes")
-        except Exception:  # noqa: BLE001
-            pass
-        need_force = bool(force) or (stamp != "0:0" and stamp != (last_changes or "0:0"))
-        backup = rp.cmd_backup({"force": need_force})
-        out["rides"] = backup.get("rides")
-        out["reason"] = backup.get("reason")
-        out["change"] = backup.get("change")
-        if not backup.get("upload"):
-            out["message"] = backup.get("reason") or "No new rides since the last upload."
-            return out
-        require_scopes(SCOPE_DRIVE_FILE, tokens=tokens)
-        file_id = None
+            rivia_places.need_restore(pcon)
+            out["rides"] = rivia_places.ride_count(pcon)
+        finally:
+            pcon.close()
+        scon = _sched_db()
         try:
-            file_id, _ = _drive_meta_get("drive_file_id")
-        except Exception:  # noqa: BLE001
-            file_id = None
-        if not file_id:
-            file_id = None
-        uploaded = upload_scheduler_db(backup["db_path"], file_id=file_id)
-        new_id = uploaded["id"]
-        rp.cmd_backup_uploaded({"change": backup["change"]})
-        try:
-            _, stamp = _drive_meta_get("drive_uploaded_changes")
-            _drive_meta_set(drive_file_id=new_id, drive_uploaded_changes=stamp)
-        except Exception as e:  # noqa: BLE001
-            print("rivia: could not record Drive file id (%s); continuing." % type(e).__name__,
-                  file=sys.stderr)
+            todo = []
+            for name in BACKUP_DBS:
+                con = _open_part_db(name)
+                try:
+                    digest = _content_hash(con)
+                    if force or digest != _store().get_meta(scon, "drive_hash." + name):
+                        todo.append((name, _snapshot(con, name), digest))
+                finally:
+                    con.close()
+            if not todo:
+                out["reason"] = out["message"] = "No new rides or changes since the last upload."
+                return out
+            require_scopes(SCOPE_DRIVE_FILE, tokens=tokens)
+            for name, path, digest in todo:
+                uploaded = upload_scheduler_db(path, file_id=_drive_file_id(scon, name), name=DRIVE_NAMES[name])
+                try:
+                    _store().set_meta(scon, "drive_file_id." + name, uploaded["id"])
+                    _store().set_meta(scon, "drive_hash." + name, digest)
+                    _store().set_meta(scon, "drive_uploaded_at", datetime.now(TZ).isoformat(timespec="seconds"))
+                except Exception as e:  # noqa: BLE001
+                    print("rivia: could not record the Drive upload of %s (%s); continuing." % (name, type(e).__name__),
+                          file=sys.stderr)
+                out["files"].append({"db": name, "name": uploaded.get("name") or DRIVE_NAMES[name],
+                                     "drive_file_id": uploaded["id"], "modifiedTime": uploaded.get("modifiedTime"),
+                                     "bytes": os.path.getsize(path)})
+        finally:
+            scon.close()
         out["uploaded"] = True
-        out["drive_file_id"] = new_id
-        out["name"] = uploaded.get("name") or drive_backup_name()
-        if uploaded.get("modifiedTime"):
-            out["modifiedTime"] = uploaded["modifiedTime"]
-        out["bytes"] = backup.get("bytes")
-        out["sha256"] = backup.get("sha256")
-        out["change"] = backup.get("change")
-        out["message"] = "Uploaded scheduler.db to Drive."
+        out["message"] = "Uploaded %s to Drive." % ", ".join(f["db"] + ".db" for f in out["files"])
         return out
     except GcalError as e:
         if e.code == "needs_relogin":
@@ -1177,7 +894,7 @@ def run_drive_backup(*, force=False):
         out["error"] = {"code": e.code, "msg": str(e), "step": e.step}
         out["status"] = clock_status()
         return out
-    except rp.RiviaError as e:
+    except rivia_places.RiviaError as e:
         out["ok"] = False
         out["error"] = {"code": e.code, "msg": str(e), "step": getattr(e, "step", None) or "planner"}
         return out

@@ -72,7 +72,7 @@ def refused(fn):
 
 
 def standing(key):
-    con = rp.db_open()
+    con = sched.db_open()  # schedule settings live in scheduler.db
     try:
         row = con.execute("select value from settings where key=?", (key,)).fetchone()
         return None if not row else json.loads(row[0])
@@ -244,10 +244,6 @@ admin_mint = subprocess.run(
 ok(admin_mint.returncode == 0 and "eyJ" not in admin_mint.stdout and "eyJ" not in admin_mint.stderr,
    "admin mint in the approval test does not print the token")
 ADMIN = ra.load_admin_token()
-with ra.db() as c:
-    c.execute("insert or ignore into clients values(?,?,?,?)",
-              ("grok-test", '["https://www.cursor.com/agents/mcp/oauth/callback"]', "Grok Bot", time.time()))
-BOT = ra.issue_tokens("grok-test")["access_token"]
 
 
 def raw_post(path, token, body):
@@ -292,12 +288,11 @@ async def call(url, token, tool, args):
 
 
 async def main():
-    A, B, D = BASE + "/app/mcp", BASE + "/mcp", BASE + "/admin/mcp"
-    at, bt, dt = await listed(A, APP), await listed(B, BOT), await listed(D, ADMIN)
+    A, D = BASE + "/app/mcp", BASE + "/admin/mcp"
+    at, dt = await listed(A, APP), await listed(D, ADMIN)
     queue = {"list_changes", "approve_change", "reject_change", "undo_change"}
     ok(queue <= set(dt), "admin door lists the approval-queue tools")
-    ok(not (queue & set(at)) and not (queue & set(bt)),
-       "approval-queue tools stay off the app and bot doors")
+    ok(not (queue & set(at)), "approval-queue tools stay off the app door")
     got = await call(D, ADMIN, "approve_change", {"change_id": pending5["change_id"]})
     ok(got.get("ok") is True and (got.get("data") or {}).get("status") == "applied"
        and standing("wind_down_minutes") == 90,

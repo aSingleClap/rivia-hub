@@ -123,16 +123,16 @@ finally:
 ok(sched.ACTIONS["sched.get_settings"]["doors"] == ("app",), "get_settings is app door only")
 ok(sched.ACTIONS["sched.change_setting"]["doors"] == ("app",), "change_setting is app door only")
 ok(sched.ACTIONS["sched.undo_change"]["doors"] == ("app",), "undo_change is app door only")
-ok(sched.ACTIONS["sched.places"]["doors"] == ("app",), "places is app door only")
-ok(sched.ACTIONS["sched.arrival"]["doors"] == ("app",), "arrival is app door only")
-ok(sched.ACTIONS["sched.log_ride"]["doors"] == ("app",), "log_ride is app door only")
+ok(tools.ACTIONS["sched.places"]["doors"] == ("app",), "places is app door only")
+ok(tools.ACTIONS["sched.arrival"]["doors"] == ("app",), "arrival is app door only")
+ok(tools.ACTIONS["sched.log_ride"]["doors"] == ("app",), "log_ride is app door only")
 ok(sched.ACTIONS["sched.write_day"]["doors"] == ("app",), "write_day is app door only")
 ok("bot" not in sched.ACTIONS["sched.get_settings"]["doors"]
    and "bot" not in sched.ACTIONS["sched.change_setting"]["doors"]
    and "bot" not in sched.ACTIONS["sched.undo_change"]["doors"]
-   and "bot" not in sched.ACTIONS["sched.places"]["doors"]
-   and "bot" not in sched.ACTIONS["sched.arrival"]["doors"]
-   and "bot" not in sched.ACTIONS["sched.log_ride"]["doors"],
+   and "bot" not in tools.ACTIONS["sched.places"]["doors"]
+   and "bot" not in tools.ACTIONS["sched.arrival"]["doors"]
+   and "bot" not in tools.ACTIONS["sched.log_ride"]["doors"],
    "settings, places, arrival, and log_ride actions are not on the bot door")
 
 
@@ -246,7 +246,7 @@ gcal.save_tokens({"refresh_token": "refresh-dead", "access_token": "stale",
                   "expiry": time.time() - 120, "scope": gcal.SCOPE_READ, "token_type": "Bearer"})
 gcal.reset_clock()
 # clear prior notice day so the first failure is recorded
-con = tools.open_db()
+con = sched.db_open()  # Google notice bookkeeping lives in scheduler.db
 try:
     con.execute("delete from meta where key in ('gcal_login_notice_day','gcal_login_notice')")
 finally:
@@ -298,10 +298,6 @@ APP = subprocess.run([sys.executable, os.path.join(HERE, "rivia_auth.py"), "mint
                      capture_output=True, text=True, env=os.environ)
 ok(APP.returncode == 0, "minted app token")
 APP = APP.stdout.strip()
-with ra.db() as c:
-    c.execute("insert into clients values(?,?,?,?)",
-              ("grok-test", '["https://www.cursor.com/agents/mcp/oauth/callback"]', "Grok Bot", time.time()))
-BOT = ra.issue_tokens("grok-test")["access_token"]
 
 
 async def listed(url, token):
@@ -316,8 +312,17 @@ async def call(url, token, tool, args):
 
 
 async def main():
-    A, B = BASE + "/app/mcp", BASE + "/mcp"
-    at, bt = await listed(A, APP), await listed(B, BOT)
+    A = BASE + "/app/mcp"
+    at = await listed(A, APP)
+    import urllib.error
+    import urllib.request
+    try:
+        urllib.request.urlopen(urllib.request.Request(BASE + "/mcp", data=b"{}", method="POST",
+                                                      headers={"authorization": "Bearer " + APP}), timeout=5)
+        bot_status = 200
+    except urllib.error.HTTPError as e:
+        bot_status = e.code
+    ok(bot_status == 404, "the Grok bot door /mcp is gone (404)")
     ok("ride_time" in at, "app door lists ride_time")
     ok("plan_day" in at, "app door lists plan_day")
     ok("get_schedule_settings" in at and "change_schedule_setting" in at and "undo_schedule_change" in at,
@@ -325,14 +330,10 @@ async def main():
     ok("app_places" in at, "app door lists app_places")
     ok("app_arrival" in at and "app_log_ride" in at and "write_day" in at, "app door lists app_arrival, app_log_ride, and write_day")
     ok("plan_week" not in at, "plan_week has no seeded row")
-    ok("ride_time" not in bt and "plan_day" not in bt and "plan_week" not in bt
-       and "get_schedule_settings" not in bt and "change_schedule_setting" not in bt
-       and "undo_schedule_change" not in bt and "app_places" not in bt
-       and "app_arrival" not in bt and "app_log_ride" not in bt and "write_day" not in bt
-       and "app_pin_place" not in bt and "app_open" not in bt,
-       "bot door has no scheduler tools")
-    ok(not (set(at) & set(admin.ADMIN_TOOLS)) and not (set(bt) & set(admin.ADMIN_TOOLS)),
-       "admin tools stay off the app and bot doors")
+    ok(not ({"ask_bot", "check_reply", "post_reply"} & set(at)), "no bot tools on the app door")
+    ok(set(admin.READ_ONLY_APP_TOOLS) <= set(at), "hub_status, list_tools and list_calls are on the app door (read only)")
+    ok(not (set(at) & (set(admin.ADMIN_TOOLS) - set(admin.READ_ONLY_APP_TOOLS))),
+       "set_setting, restart_server and the approval tools stay off the app door")
     schema = getattr(at["ride_time"], "input_schema", None) or at["ride_time"].inputSchema
     props = (schema or {}).get("properties") or {}
     ok("from" in props and "to" in props, "ride_time schema uses public names from and to")
@@ -354,7 +355,7 @@ async def main():
        "MCP need_estimate for gym>pf")
     ok("minutes" not in (need.get("data") or {}), "MCP need_estimate has no minutes")
 
-    con = sqlite3.connect(os.path.join(os.environ["RIVIA_DIR"], "scheduler.db"))
+    con = sqlite3.connect(os.path.join(os.environ["RIVIA_DIR"], "core.db"))  # the call log is core's
     calls = list(con.execute("select door, tool, action, ok, code, ms from calls order by rowid"))
     con.close()
     ok(len(calls) >= 2, "calls log has a row per ride_time call")

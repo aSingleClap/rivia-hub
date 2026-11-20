@@ -33,6 +33,7 @@ sys.path.insert(0, HERE)
 import rivia_gcal as gcal
 import rivia_planner as rp
 import rivia_sched as sched
+import rivia_approvals as approvals
 import rivia_tools as tools
 
 
@@ -206,7 +207,7 @@ gcal.post_termux_notification = notify
 
 
 def clear_meta(*keys):
-    con = rp.db_open()
+    con = gcal._sched_db()  # scheduling's bookkeeping lives in scheduler.db
     try:
         for k in keys:
             try:
@@ -222,7 +223,7 @@ def clear_meta(*keys):
 
 
 def wipe_write_days():
-    con = rp.db_open()
+    con = approvals.db_open()
     try:
         con.execute("delete from changes where kind='write_day' or key='write_day'")
         con.commit()
@@ -322,7 +323,7 @@ prop = sched.propose_tomorrow(now=fri_530)
 ok(prop.get("proposed") is True and prop.get("day") == SAT, "05:30 proposes tomorrow")
 ok(prop.get("asked") == "system", "the proposal is asked=system")
 row = None
-con = rp.db_open()
+con = approvals.db_open()
 try:
     row = con.execute("select door, kind, status from changes where change_id=?",
                       (prop["change_id"],)).fetchone()
@@ -357,7 +358,7 @@ ok(changed.get("superseded") is True and changed.get("proposed") is True,
    "21:00 supersedes when tomorrow's plan changed")
 ok(changed.get("old") == queued["change_id"] and changed.get("change_id") != queued["change_id"],
    "the new preview replaces the old pending item")
-con = rp.db_open()
+con = approvals.db_open()
 try:
     old_st = con.execute("select status from changes where change_id=?",
                          (queued["change_id"],)).fetchone()[0]
@@ -382,7 +383,7 @@ sat_530 = datetime(2026, 12, 5, 5, 30, tzinfo=gcal.TZ)
 results = sched.auto_write_due(now=sat_530)
 ok(any(r.get("ok") and r.get("change_id") == pending["change_id"] and r.get("written") for r in results),
    "05:30 auto-writes the pending write_day")
-con = rp.db_open()
+con = approvals.db_open()
 try:
     st_status = con.execute("select status from changes where change_id=?",
                             (standing["change_id"],)).fetchone()[0]
@@ -410,7 +411,7 @@ ok(hit and hit[0]["ok"] is False and hit[0]["error"] == "changed_since_preview",
 ok(not fake.events, "nothing was written after a stale preview")
 ok(any("changed since its preview" in n for n in fake.notifications),
    "Termux is notified when auto-write refuses a stale preview")
-con = rp.db_open()
+con = approvals.db_open()
 try:
     st = con.execute("select status, reason from changes where change_id=?",
                      (queued["change_id"],)).fetchone()
@@ -444,7 +445,7 @@ results = sched.auto_write_due(now=late)
 ok(not any(r.get("change_id") == pending["change_id"] for r in results),
    "catch-up does not write after the first block has started")
 ok(not fake.events, "no events written after the day is under way")
-con = rp.db_open()
+con = approvals.db_open()
 try:
     # expire_pending should have flipped it
     st = con.execute("select status from changes where change_id=?",
@@ -475,7 +476,7 @@ no_primary_writes("no_shift delete")
 # ── 12. writing to primary is refused; the test fails if a write is aimed there ──
 reset()
 # plant a primary id in meta and call write_rivia_day directly
-rp_con = rp.db_open()
+rp_con = gcal._sched_db()
 try:
     rp.set_meta(rp_con, gcal.META_RIVIA_ID, "primary")
 finally:
@@ -524,7 +525,7 @@ standing = sched.change_setting_sync(
     "arrive_early_minutes", 12, "standing", door="app", now=NOW,
 )
 old_created = rp.iso(int(NOW.timestamp()) - 25 * 3600)
-con = rp.db_open()
+con = approvals.db_open()
 try:
     con.execute("update changes set created=? where change_id=?", (old_created, pending["change_id"]))
     con.execute("update changes set created=? where change_id=?", (old_created, standing["change_id"]))

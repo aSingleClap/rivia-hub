@@ -31,6 +31,11 @@ import rivia_gcal as gcal
 import rivia_planner as rp
 import rivia_sched as sched
 
+# The test runs on fixed dates (Nov 16, 2026); keep the stale-override cleanup on that day
+# too, so a Nov 16 day change is not wiped because the box clock is later.
+_real_purge = sched._purge_overrides
+sched._purge_overrides = lambda con, today=None: _real_purge(con, today if today is not None else NOW)
+
 
 def ok(cond, label):
     assert cond, label
