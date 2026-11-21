@@ -550,6 +550,12 @@ def signin_check_enabled():
     return os.environ.get("RIVIA_SIGNIN_CHECK", "1").strip().lower() not in ("0", "false", "off", "no")
 
 
+def sched_timer_enabled():
+    """RIVIA_SCHED_TIMER=0 parks scheduling's part of the daily timer: the 05:30 slot runs only
+    the sign-in check (no auto-write, tomorrow proposal or Drive backup) and 21:00 is skipped."""
+    return os.environ.get("RIVIA_SCHED_TIMER", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
 def plan_window(first_day, last_day, *, before=2, after=2):
     start = first_day - timedelta(days=before)
     end = last_day + timedelta(days=after + 1)
@@ -624,7 +630,11 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
     while True:
         try:
             now = get_now()
-            if signin_check_due(now):
+            sched_on = sched_timer_enabled()
+            due = signin_check_due(now)
+            if due and not sched_on:
+                run_signin_check(now=now, mark_ran=True)
+            elif due:
                 try:
                     import rivia_sched as sched
                     sched.run_morning_tick(now=now)
@@ -639,7 +649,7 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
                               file=sys.stderr)
             try:
                 import rivia_sched as sched
-                if sched.evening_refresh_due(now):
+                if sched_on and sched.evening_refresh_due(now):
                     sched.run_evening_refresh(now=now)
             except Exception as e:  # noqa: BLE001
                 print("rivia: evening refresh failed (%s); continuing." % type(e).__name__,

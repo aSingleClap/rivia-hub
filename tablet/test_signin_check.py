@@ -340,6 +340,43 @@ ok(ran[0]["now"] == NOW and ran[1]["now"] == NEXT_DAY,
 ok(gcal.last_signin_check_day() == "2026-11-16", "loop recorded the later run")
 
 
+# ── RIVIA_SCHED_TIMER=0: the 05:30 slot runs only the sign-in check; 21:00 is skipped ──
+import rivia_sched as _sched
+gcal.mark_signin_check_ran("2026-11-14")
+parked = {"tick": 0, "evening": 0}
+real_tick, real_due, real_evening = _sched.run_morning_tick, _sched.evening_refresh_due, _sched.run_evening_refresh
+ran.clear()
+ticks["n"] = 0
+clock["now"] = NOW
+
+
+async def stop_after_one(_s):
+    raise asyncio.CancelledError
+
+
+async def run_parked():
+    gcal.run_signin_check = wrapped
+    _sched.run_morning_tick = lambda now=None: parked.__setitem__("tick", parked["tick"] + 1)
+    _sched.evening_refresh_due = lambda now=None: True
+    _sched.run_evening_refresh = lambda now=None: parked.__setitem__("evening", parked["evening"] + 1)
+    os.environ["RIVIA_SCHED_TIMER"] = "0"
+    try:
+        try:
+            await gcal.signin_check_loop(get_now=lambda: clock["now"], sleep=stop_after_one, interval_s=1)
+        except asyncio.CancelledError:
+            pass
+    finally:
+        os.environ.pop("RIVIA_SCHED_TIMER", None)
+        gcal.run_signin_check = real
+        _sched.run_morning_tick, _sched.evening_refresh_due, _sched.run_evening_refresh = real_tick, real_due, real_evening
+
+
+asyncio.run(run_parked())
+ok(len(ran) == 1 and ran[0]["mark_ran"] is True, "parked timer: 05:30 slot still runs the sign-in check")
+ok(parked["tick"] == 0, "parked timer: no morning tick (no auto-write, proposal or Drive backup)")
+ok(parked["evening"] == 0, "parked timer: 21:00 evening refresh skipped")
+ok(gcal.last_signin_check_day() == NOW.strftime("%Y-%m-%d"), "parked timer: today's run is recorded")
+
 # ── rivia.sh routes the command ──
 sh = open(os.path.join(HERE, "rivia.sh")).read()
 ok("signin-check) sched_gcal" in sh, "rivia.sh has rivia sched signin-check")
