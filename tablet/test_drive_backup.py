@@ -294,6 +294,11 @@ ok(forced["ok"] is True and [f["db"] for f in forced["files"]] == ["approvals"],
 stable = g.run_drive_backup()
 ok(stable["ok"] is True and stable["uploaded"] is False, "after that, a quiet run is again a no-op")
 ok(g.run_drive_backup(force=True)["uploaded"] is True, "--force uploads anyway")
+n_before = len(fake.uploads)
+core_only = g.run_drive_backup(force=True, only=("core",))
+ok(core_only["ok"] is True and [f["db"] for f in core_only["files"]] == ["core"],
+   "only=('core',) uploads core.db and nothing else")
+ok([u["name"] for u in fake.uploads[n_before:]] == ["rivia-core.db"], "only one Drive request, for rivia-core.db")
 
 # ── a fresh places.db (no start-fresh) is restore_first, not a crash ──
 os.remove(rp.db_file())
