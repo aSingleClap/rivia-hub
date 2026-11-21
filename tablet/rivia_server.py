@@ -6,6 +6,7 @@
 #               list_tools / list_calls, and the tool-table rows: places tools (always) and
 #               scheduling tools (when scheduling loaded).
 #   /admin/mcp  the Server Hub (token from `rivia admin-token`): fixed admin tools, not rows.
+#   /app/emotion  the app's emotion button (rivia_emotion_app): plain HTTP, app token, not a tool.
 # The Grok bot door (/mcp, ask_bot / check_reply / post_reply) was removed in the core split;
 # git tag oauth-bot-archive keeps it.
 #
@@ -98,7 +99,21 @@ def public_app():
                     with suppress(asyncio.CancelledError):
                         await task
 
-    return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner)
+    return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
+                                extra_routes=emotion_routes())
+
+
+def emotion_routes():
+    """The app's emotion button (/app/emotion, emotion spec Step 1.5): a plain route behind the app
+    token, never an MCP tool, so it is never in Gemini's tool list. If it fails to load, the server
+    keeps serving without it."""
+    try:
+        import rivia_emotion_app
+        return rivia_emotion_app.routes()
+    except Exception as e:  # noqa: BLE001
+        print("rivia: emotion button did not load (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return []
 
 
 if __name__ == "__main__":

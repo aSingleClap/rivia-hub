@@ -4,6 +4,7 @@ RIVIA door auth (core): a bearer gate in front of the two doors.
   /app/mcp     the Rivia app   (app token: `rivia token`, or the app's Google sign-in)
   /admin/mcp   the Server Hub  (admin token: `rivia admin-token`, stored on the tablet)
   /app/login   POST only, no bearer, no CORS, about 5 a minute: the app's Google sign-in
+  /app/emotion GET/POST, app token: the app's emotion button (rivia_emotion_app); not an MCP tool
                gives the tablet its Google token and the app a new app token (rivia_applogin.py).
                Only RIVIA_LOGIN_EMAIL's Google account is accepted.
   /health      open
@@ -263,16 +264,23 @@ def with_cors(app):
     return no_cors_for_login
 
 
-def build_app(lifespan=None, app_mcp=None, admin_mcp=None):
+def build_app(lifespan=None, app_mcp=None, admin_mcp=None, extra_routes=()):
     """app_mcp / admin_mcp: ASGI apps serving MCP at /mcp, mounted under /app and /admin.
-    Pass a lifespan that starts every mounted MCP app, or the session managers never start."""
+    Pass a lifespan that starts every mounted MCP app, or the session managers never start.
+    extra_routes: plain HTTP routes (not MCP tools), matched before the mounts. Each must sit under
+    /app/ or /admin/ so the bearer gate checks it like that door; anything else is refused here."""
     if not SIGNING_KEY:
         raise SystemExit("Missing RIVIA_JWT_KEY. Run: python rivia_auth.py setup")
+    for r in extra_routes:
+        p = getattr(r, "path", "")
+        if p == APP_LOGIN_PATH or is_open_path(p, "POST") or not (
+                path_fits_door(p, APP_PREFIX) or path_fits_door(p, ADMIN_PREFIX)):
+            raise SystemExit("extra route %r must be under /app/ or /admin/ and need a bearer" % p)
     init_db()
     routes = [
         Route("/health", health),
         Route(APP_LOGIN_PATH, app_login, methods=["POST"]),
-    ]
+    ] + list(extra_routes)
     if app_mcp:
         routes.append(Mount("/app", app=app_mcp))
     if admin_mcp:
