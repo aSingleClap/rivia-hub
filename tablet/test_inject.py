@@ -12,6 +12,13 @@ os.environ["RIVIA_DIR"] = os.path.join(TMP, "rivia")
 sys.path.insert(0, HERE)
 
 import rivia_emotion as emo  # noqa: E402  (after RIVIA_DIR is set)
+# Step 2 (2.9 merge): decay is on, so the state moves between two reads a second apart, and a nudge starts
+# from the faded value. Every check in this file is about Step 1 behaviour (storing, clamping, the log, the
+# label, the doors), which assumes no time passes, so the clock is stopped for this file. Nothing else
+# changes. Decay is tested in test_decay.py and test_step2_acceptance.py.
+import rivia_time as _rt  # noqa: E402
+_STOPPED = _rt.now_s()
+_rt.now_s = lambda: _STOPPED
 import rivia_inject as inj  # noqa: E402
 
 pts = emo.REFERENCE_POINTS
@@ -110,6 +117,13 @@ try:
 finally:
     inj.SHADOW = True
 ok(inj.for_gemini() == "", "back in shadow mode")
+
+print("5b. Step 2.1: the line reads the emotion layer only")
+emo.write(*emo.REFERENCE_POINTS["anger"], cause="anger", door="code")
+emo.write(*emo.REFERENCE_POINTS["joy"], cause="joy mood", door="code", layer="mood")
+emo.write(*emo.REFERENCE_POINTS["calm"], cause="calm baseline", door="code", layer="baseline")
+ok(inj.current()["name"] == "anger", "with mood at joy and baseline at calm, the line still names emotion's anger")
+ok(inj.for_gemini() == "", "and in shadow mode nothing reaches Gemini")
 
 print("6. nothing in Step 1 wires the line into a prompt")
 src = open(os.path.join(HERE, "rivia_inject.py")).read()

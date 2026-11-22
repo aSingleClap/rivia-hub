@@ -664,6 +664,17 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
             except Exception as e:  # noqa: BLE001
                 print("rivia: evening refresh failed (%s); continuing." % type(e).__name__,
                       file=sys.stderr)
+            try:
+                # Emotion spec Step 2.8: weekly Gemini drift check (off unless RIVIA_DRIFT_WEEKLY=1).
+                # No Gemini calls; at most one notification. The network reads (4 small GitHub
+                # files and one docs page, 30 s timeout each) run in a thread so the server keeps
+                # answering while they wait.
+                import rivia_drift_weekly as drift_weekly
+                if drift_weekly.enabled() and drift_weekly.weekly_due(now):
+                    await asyncio.to_thread(drift_weekly.run_weekly, now)
+            except Exception as e:  # noqa: BLE001
+                print("rivia: drift check failed (%s); continuing." % type(e).__name__,
+                      file=sys.stderr)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
