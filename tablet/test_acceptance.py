@@ -28,6 +28,13 @@ os.environ["RIVIA_DIR"] = os.path.join(TMP, "rivia")
 sys.path.insert(0, HERE)
 
 import rivia_emotion as emo  # noqa: E402  (after RIVIA_DIR is set)
+# Step 2 (2.9 merge): decay is on, so the state moves between two reads a second apart, and a nudge starts
+# from the faded value. Every check in this file is about Step 1 behaviour (storing, clamping, the log, the
+# label, the doors), which assumes no time passes, so the clock is stopped for this file. Nothing else
+# changes. Decay is tested in test_decay.py and test_step2_acceptance.py.
+import rivia_time as _rt  # noqa: E402
+_STOPPED = _rt.now_s()
+_rt.now_s = lambda: _STOPPED
 
 pts = emo.REFERENCE_POINTS
 ANGER = pts["anger"]

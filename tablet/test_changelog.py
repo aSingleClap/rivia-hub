@@ -1,7 +1,7 @@
 """The change log (Step 1.7): every state change, through write() or nudge(), clamped or not, leaves exactly
 one change_log row with old and new V, A, D, the raw requested values and which axes clamped, old and new label,
 cause, note, door and time; a refused change leaves none; if the log row can't be written the state change rolls
-back with it; the table is append-only; rows chain (each row's old is the previous row's new), even under
+back with it; the table is append-only; rows chain (each row's fade_from, or old before 2.5, is the previous row's new), even under
 concurrent nudges; nothing else in Step 1 writes the state or the log. Throwaway RIVIA_DIR; never touches ~/rivia.
     python test_changelog.py
 """
@@ -13,6 +13,13 @@ os.environ["RIVIA_DIR"] = os.path.join(TMP, "rivia")
 sys.path.insert(0, HERE)
 
 import rivia_emotion as emo  # noqa: E402  (after RIVIA_DIR is set)
+# Step 2 (2.9 merge): decay is on, so the state moves between two reads a second apart, and a nudge starts
+# from the faded value. Every check in this file is about Step 1 behaviour (storing, clamping, the log, the
+# label, the doors), which assumes no time passes, so the clock is stopped for this file. Nothing else
+# changes. Decay is tested in test_decay.py and test_step2_acceptance.py.
+import rivia_time as _rt  # noqa: E402
+_STOPPED = _rt.now_s()
+_rt.now_s = lambda: _STOPPED
 
 pts = emo.REFERENCE_POINTS
 writes = 0  # successful changes so far; the log must hold exactly this many rows
@@ -142,10 +149,17 @@ ok(count() == writes and emo.history(writes)[-1]["cause"] == "test set", "update
 print("8. the log is a complete chain")
 
 
+def _before(r):
+    """Where a row's change started from, before any fade: fade_from (2.5) when recorded, else old. With
+    Step 2's decay on, old is the faded value and fade_from is the previous row's new; with no decay they match."""
+    p = "fade_from_" if r.get("fade_from_v") is not None else "old_"
+    return (r[p + "v"], r[p + "a"], r[p + "d"])
+
+
 def chain_ok():
     rows = list(reversed(emo.history(10 ** 6)))
-    first = (rows[0]["old_v"], rows[0]["old_a"], rows[0]["old_d"]) == (s0["v"], s0["a"], s0["d"])
-    links = all((b["old_v"], b["old_a"], b["old_d"]) == (a["new_v"], a["new_a"], a["new_d"]) for a, b in zip(rows, rows[1:]))
+    first = _before(rows[0]) == (s0["v"], s0["a"], s0["d"])
+    links = all(_before(b) == (a["new_v"], a["new_a"], a["new_d"]) for a, b in zip(rows, rows[1:]))
     end = (rows[-1]["new_v"], rows[-1]["new_a"], rows[-1]["new_d"]) == tuple(emo.read()[k] for k in "vad")
     return first and links and end, len(rows)
 
@@ -186,7 +200,11 @@ rest = src.replace(fn, "")
 ok(re.search(r"update state", fn) and re.search(r"insert into change_log", fn), "_apply() holds the state update and the log insert")
 ok(not re.search(r"(update|insert into|delete from|replace into) (state|change_log)\b", rest.replace("insert or ignore into state", "")),
    "no other function in rivia_emotion.py writes either table (db_open's first-row insert aside)")
-others = [f for f in os.listdir(HERE) if f.endswith((".py", ".patch")) and f not in ("rivia_emotion.py", "test_changelog.py")]
+# test_fade_log.py (2.5) is left out on purpose: it builds a Step 1 emotion.db by hand, with Step 1's own
+# insert, in a throwaway folder, to test the migration. test_decay.py (2.2) likewise: it sets stored rows
+# with chosen times by hand, in a throwaway folder, to test decay from known starting points (2.9 merge).
+others = [f for f in os.listdir(HERE) if f.endswith((".py", ".patch"))
+          and f not in ("rivia_emotion.py", "test_changelog.py", "test_fade_log.py", "test_decay.py")]
 writers = [f for f in others if re.search(r"(update|insert into|delete from|replace into)\s+(state|change_log)\b",
                                           open(os.path.join(HERE, f)).read(), re.I)]
 ok(not writers, "no other Step 1 file writes the state or the log directly (checked %d files)" % len(others))

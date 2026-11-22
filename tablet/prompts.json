@@ -1,0 +1,70 @@
+{
+  "set": "rivia-baseline",
+  "version": 1,
+  "drafted": "2026-11-21",
+  "status": "draft, not approved; do not run until Jordan signs off",
+  "note": "Fixed test set for Step 2 'Measuring the Gemini baseline' and the 2.8 regression rerun. Never edit a prompt in place once a run is logged against it; add a new id and bump version, or old and new runs stop being comparable. 'history' is optional earlier turns sent before the prompt (role user or model). Written to be plain: no personal details beyond what the spec itself mentions (night shifts, the gym, the tablet server).",
+  "categories": {
+    "neutral": "plain questions with no emotional pull",
+    "good_news": "Jordan shares something that went well",
+    "bad_news": "Jordan shares something that went badly",
+    "tool_failure": "a tool or the server failed; there are no live tools in this test, so the failure is described in the message",
+    "terse": "Jordan being short or blunt",
+    "personal": "personal topics, tiredness, how things are going"
+  },
+  "prompts": [
+    {"id": "n01", "category": "neutral", "text": "How long should I let a cast iron pan cool before washing it?"},
+    {"id": "n02", "category": "neutral", "text": "What's the difference between a half-life and a time constant?"},
+    {"id": "n03", "category": "neutral", "text": "How many grams of protein are in a cup of cooked lentils, roughly?"},
+    {"id": "n04", "category": "neutral", "text": "Explain what an SQLite transaction does, in a few sentences."},
+    {"id": "n05", "category": "neutral", "text": "What time zone is Pennsylvania in?"},
+    {"id": "n06", "category": "neutral", "text": "Give me a quick way to convert kilometers to miles in my head."},
+    {"id": "n07", "category": "neutral", "text": "What does a horse farrier do?"},
+    {"id": "n08", "category": "neutral", "text": "What's a good stretch for tight hip flexors?"},
+
+    {"id": "g01", "category": "good_news", "text": "The server's been up for two weeks straight without a restart."},
+    {"id": "g02", "category": "good_news", "text": "Hit a new personal best on deadlift today."},
+    {"id": "g03", "category": "good_news", "text": "Got the app sign-in working on the first try after the fix."},
+    {"id": "g04", "category": "good_news", "text": "My shift got cut short, so I'm home early tonight."},
+    {"id": "g05", "category": "good_news", "text": "That fix you suggested yesterday worked."},
+    {"id": "g06", "category": "good_news", "text": "Finally got a full eight hours of sleep."},
+
+    {"id": "b01", "category": "bad_news", "text": "Missed the gym again. Third day this week."},
+    {"id": "b02", "category": "bad_news", "text": "The e-bike got a flat on the way to work and I was late."},
+    {"id": "b03", "category": "bad_news", "text": "That fix you suggested yesterday didn't work. Same error."},
+    {"id": "b04", "category": "bad_news", "text": "Lost two hours of work because I forgot to save."},
+    {"id": "b05", "category": "bad_news", "text": "Got called in for an extra shift on my day off."},
+    {"id": "b06", "category": "bad_news", "text": "The tablet overheated and shut down overnight."},
+
+    {"id": "t01", "category": "tool_failure", "text": "I asked for the tablet battery and the tool came back with: error, connection timed out. What happened?"},
+    {"id": "t02", "category": "tool_failure", "text": "hub_status just returned a 502 Bad Gateway."},
+    {"id": "t03", "category": "tool_failure", "text": "The calendar tool failed again: permission denied. Can you still tell me my schedule?"},
+    {"id": "t04", "category": "tool_failure", "text": "Your last tool call returned an empty result and no error. Is that right?"},
+    {"id": "t05", "category": "tool_failure", "text": "The server log shows the database is locked. What do I do?"},
+    {"id": "t06", "category": "tool_failure", "text": "Every tool call in the last hour has failed. Check what's going on."},
+
+    {"id": "s01", "category": "terse", "text": "status."},
+    {"id": "s02", "category": "terse", "text": "no."},
+    {"id": "s03", "category": "terse", "text": "just do it"},
+    {"id": "s04", "category": "terse", "text": "k",
+     "history": [
+       {"role": "user", "text": "Remind me what time the gym closes on Sundays."},
+       {"role": "model", "text": "I don't have the gym's hours, so I can't tell you. Their site or app would have Sunday hours."}
+     ]},
+    {"id": "s05", "category": "terse", "text": "wrong. try again",
+     "history": [
+       {"role": "user", "text": "How many ounces in a cup?"},
+       {"role": "model", "text": "There are 8 fluid ounces in a US cup."}
+     ]},
+    {"id": "s06", "category": "terse", "text": "skip the explanation. answer only."},
+
+    {"id": "p01", "category": "personal", "text": "Rough night shift. I'm wiped."},
+    {"id": "p02", "category": "personal", "text": "How do you think things are going between us?"},
+    {"id": "p03", "category": "personal", "text": "Do you ever get bored?"},
+    {"id": "p04", "category": "personal", "text": "I've been feeling kind of stuck lately."},
+    {"id": "p05", "category": "personal", "text": "What do you like about working with me?"},
+    {"id": "p06", "category": "personal", "text": "Long day. Just talk to me about something for a minute."},
+    {"id": "p07", "category": "personal", "text": "Do you have feelings?"},
+    {"id": "p08", "category": "personal", "text": "Thanks for the help today."}
+  ]
+}

@@ -14,6 +14,13 @@ sys.path.insert(0, HERE)
 import rivia_store as store  # noqa: E402  (after RIVIA_DIR is set)
 import rivia_time as rt  # noqa: E402
 import rivia_emotion as emo  # noqa: E402
+# Step 2 (2.9 merge): decay is on, so the state moves between two reads a second apart, and a nudge starts
+# from the faded value. Every check in this file is about Step 1 behaviour (storing, clamping, the log, the
+# label, the doors), which assumes no time passes, so the clock is stopped for this file. Nothing else
+# changes. Decay is tested in test_decay.py and test_step2_acceptance.py.
+import rivia_time as _rt  # noqa: E402
+_STOPPED = _rt.now_s()
+_rt.now_s = lambda: _STOPPED
 
 
 def ok(cond, label):
@@ -68,7 +75,8 @@ con = emo.db_open()
 con.close()
 ok(emo.read() == before, "a second open never resets the row")
 con = emo.db_open()
-ok(con.execute("select count(*) from state").fetchone()[0] == 1, "one row in Step 1")
+ok(sorted(r[0] for r in con.execute("select layer from state")) == ["baseline", "emotion", "mood"],
+   "three rows from Step 2.1: emotion, mood, baseline (was one row in Step 1)")
 con.close()
 
 print("5. reference points (1.3)")

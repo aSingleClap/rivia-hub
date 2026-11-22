@@ -22,6 +22,17 @@ import rivia_time as rt
 
 SHADOW = True  # True: build and log only. False: for_gemini() returns the line. Edit here only.
 
+# Step 2.3: which layer the label and this line read. Step 2 has three layers (emotion, mood, baseline);
+# the line reads the EMOTION layer with decay applied, i.e. whatever rivia_emotion.read() returns. Emotion
+# decays toward mood and mood toward baseline (2.2), so a fresh spike shows first, the lingering mood shows
+# once the spike fades, and the baseline shows once the mood fades too. Mood and baseline are never read
+# here directly: reading mood would hide spikes, reading baseline would hide both. GET /app/emotion
+# (rivia_emotion_app._view) reads the same thing, so the app's dial and this line always agree.
+# Jordan (Nov 21): her normal counts as neutral. The baseline is passed to label() as rest, so within
+# NEUTRAL_BELOW of her baseline the line is empty even when the baseline isn't 0, 0, 0.
+LABEL_LAYER = "emotion"
+REST_LAYER = "baseline"
+
 LOG_SCHEMA = """
 create table if not exists inject_log(
     id integer primary key, at text not null, v real not null, a real not null, d real not null,
@@ -66,11 +77,11 @@ STYLE = {
 DEFAULT_STYLE = "plain"
 
 
-def build_line(v, a, d):
+def build_line(v, a, d, *, rest=None):
     """The words for a V, A, D point: {"line", "name", "intensity", "level", "style"}.
-    Near 0 the line is NEUTRAL_LINE and level is 0. Pure; reads nothing, writes nothing.
-    Never feed the result to Gemini; for_gemini() is the only door for that."""
-    lab = emo.label(v, a, d)
+    Near 0, or near rest (her baseline, 2.3), the line is NEUTRAL_LINE and level is 0. Pure; reads nothing,
+    writes nothing. Never feed the result to Gemini; for_gemini() is the only door for that."""
+    lab = emo.label(v, a, d, rest=rest)
     name = lab["name"]
     if name == "neutral":
         return {"line": NEUTRAL_LINE, "name": "neutral", "intensity": "neutral", "level": 0, "style": DEFAULT_STYLE}
@@ -91,11 +102,14 @@ def _log(built, state, shadow):
 
 
 def current(con=None):
-    """Build the line for her current state and log it. Returns build_line()'s dict plus "shadow".
+    """Build the line for her current state (the decayed emotion layer) and log it. Returns build_line()'s
+    dict plus "shadow" and "layer".
     For logs and the admin view; not for prompts. May raise (unlike for_gemini)."""
-    state = emo.read(con)
-    built = build_line(state["v"], state["a"], state["d"])
+    layers = emo.read_all(con)  # decayed (2.2); the label names LABEL_LAYER, measured against REST_LAYER (2.3)
+    state, base = layers[LABEL_LAYER], layers[REST_LAYER]
+    built = build_line(state["v"], state["a"], state["d"], rest=(base["v"], base["a"], base["d"]))
     built["shadow"] = SHADOW
+    built["layer"] = LABEL_LAYER
     _log(built, state, SHADOW)
     return built
 
