@@ -16,6 +16,8 @@
 # stacked. Nothing here raises: a bad tick is printed to server.log as one line and the next tick runs as usual.
 #
 # It is not a Gemini tool and it is on no door (4.8). It changes no mood (4.4 to 4.6 read body.db on their own).
+# Step 5.6: after 4.9's dials, rivia_progress logs the plan-accuracy trend to body.db in shadow (RIVIA_PLAN_SHADOW=0
+# turns it off). It reads the scheduler's files read-only and never writes them.
 import asyncio
 import json
 import os
@@ -28,6 +30,10 @@ try:  # Step 4.9 shadow mode: if it fails to load, the collector still collects
     import rivia_body_shadow as shadow
 except Exception:  # noqa: BLE001
     shadow = None
+try:  # Step 5.6 plan-accuracy trend in shadow mode: same rule, the collector never depends on it
+    import rivia_progress as progress
+except Exception:  # noqa: BLE001
+    progress = None
 import rivia_store as store
 
 INTERVAL_S = 60          # one reading a minute: 15 samples in each of 4.3's 15-minute windows
@@ -125,6 +131,16 @@ def collect_once(con=None, now=None, read=None):
                     out["shadow"] = shadow.shadow_tick(con, now_epoch)
                 except Exception as e:  # noqa: BLE001
                     out["shadow_error"] = type(e).__name__
+            # Step 5.6: the plan trend, right after the dials so it sees this tick's body pull (counted once).
+            # Logged to body.db only, like the dials; a failure is noted and changes nothing else.
+            if progress is not None and progress.enabled():
+                try:
+                    share = (out.get("shadow") or {}).get("share") or (0.0, 0.0, 0.0)
+                    res = progress.shadow_tick(con, now_epoch, body_share=share)
+                    out["plan"] = {"scored": res["scored"], "direction": res["trend"]["direction"],
+                                   "would_read": res["mood"]["would_read"]}
+                except Exception as e:  # noqa: BLE001
+                    out["plan_error"] = type(e).__name__
         except Exception as e:  # noqa: BLE001
             out["error"] = type(e).__name__
         out["took_ms"] = int((time.perf_counter() - t0) * 1000)

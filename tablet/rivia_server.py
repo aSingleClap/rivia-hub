@@ -113,7 +113,7 @@ def public_app():
                         await body_task
 
     return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
-                                extra_routes=emotion_routes())
+                                extra_routes=emotion_routes() + progress_routes())
 
 
 def start_body_collector():
@@ -156,7 +156,20 @@ def emotion_routes():
 
 
 
-def _logged_route(route):
+def progress_routes():
+    """The app's layer 5 editor (/app/progress, emotion spec Step 5.7): Jordan adjusts Step 5's values (goals, scores,
+    weights, mood pull), each at its own step. A plain route behind the app token like the emotion button, never an MCP tool, so Gemini can't see or
+    call it. If it fails to load, the server keeps serving without it."""
+    try:
+        import rivia_progress_app
+        return [_logged_route(r, "app_progress", "route.progress") for r in rivia_progress_app.routes()]
+    except Exception as e:  # noqa: BLE001
+        print("rivia: layer 5 editor did not load (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return []
+
+
+def _logged_route(route, tool="app_emotion", action="route.emotion"):
     """The emotion button's route, with each press timed in the call log (emotion spec Step 4.1, Jordan Nov 22:
     "They can be logged especially for response time and failures"): tool "app_emotion", door "app",
     action "route.emotion". Wrapped here in core, so rivia_emotion_app still imports no tool code (its Step 1
@@ -178,7 +191,7 @@ def _logged_route(route):
                 status = getattr(resp, "status_code", 500)
                 ok = status < 400
                 code = None if ok else ("internal" if status >= 500 else "http_%d" % status)
-                tools.log_call("app", "app_emotion", "route.emotion", ok, code,
+                tools.log_call("app", tool, action, ok, code,
                                int((time.perf_counter() - t0) * 1000))
             except Exception:  # noqa: BLE001
                 pass
