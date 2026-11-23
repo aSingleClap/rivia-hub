@@ -52,6 +52,28 @@ check("uptime None when the pid has no /proc entry", b.uptime_s(rivia, proc) is 
 write(os.path.join(rivia, "server.pid"), "4242\n")
 check("uptime None with no pid file", b.uptime_s(os.path.join(root, "nowhere"), proc) is None)
 
+# /proc/uptime unreadable (Android refuses it to apps): fall back to the boot clock. A fake proc with the
+# server's stat (fake start time, 1000 s after boot) but no uptime file, and a fake boot clock.
+proc_nb = os.path.join(root, "proc_noboot")
+write(os.path.join(proc_nb, "4242", "stat"), "4242 (python rivia_s) " + " ".join(fields))
+check("no /proc/uptime: uptime from the boot clock", b.uptime_s(rivia, proc_nb, boot_clock=lambda: 4600.5) == 3600.5)
+write(os.path.join(proc_nb, "uptime"), "garbage")
+check("garbled /proc/uptime: boot clock used", b.uptime_s(rivia, proc_nb, boot_clock=lambda: 1300.0) == 300.0)
+os.remove(os.path.join(proc_nb, "uptime"))
+check("no /proc/uptime and no boot clock: None", b.uptime_s(rivia, proc_nb, boot_clock=lambda: None) is None)
+
+
+def _no_clock():
+    raise OSError("no clock")
+
+
+check("boot clock that fails: None, no crash", b.uptime_s(rivia, proc_nb, boot_clock=_no_clock) is None)
+check("/proc/uptime still wins when readable", b.uptime_s(rivia, proc, boot_clock=lambda: 99999.0) == 3600.5)
+write(os.path.join(proc_nb, "4242", "stat"), "4242 (python rivia_s) S 0 0")
+check("short stat (no start time): None, no crash", b.uptime_s(rivia, proc_nb, boot_clock=lambda: 4600.5) is None)
+r = b.uptime_s(rivia, os.path.join(root, "proc_real_clock"))
+check("no stat for the pid: None even with the real boot clock", r is None)
+
 # ---- restarts (watch.log, as rivia.sh's watch_loop writes it) ----
 write(os.path.join(logs, "watch.log"), "\n".join([
     "2026-11-22 09:00:00 server or tunnel down; restarting",               # 3 h ago: outside a 1 h window
@@ -182,6 +204,44 @@ t = b.tunnel(rivia_dir=rivia, proc=proc, get=getter(metrics_port=1))
 check("no metrics server: edge None", t["edge_connections"] is None)
 write(os.path.join(proc, "777", "cmdline"), "python\0something\0")
 check("a reused pid isn't cloudflared", b.tunnel(rivia_dir=rivia, proc=proc, get=getter())["cloudflared_running"] is False)
+
+# The real read path against a real (local) metrics page as big as cloudflared's: the line sits past the
+# first 4 KB, where a 4 KB read used to cut it off and leave edge_connections None.
+import http.server, threading  # noqa: E402,E401
+
+BIG_METRICS = (b"# HELP filler x\n" + b"".join(b"go_gc_duration_seconds{quantile=\"0.%03d\"} 0.0001\n" % i
+                                            for i in range(400))
+               + b"cloudflared_tunnel_ha_connections 4\ncloudflared_tunnel_total_requests 812\n")
+PAGES = {"/metrics": BIG_METRICS, "/nometrics": b"# HELP x\nsomething_else 1\n" * 300,
+         "/garbled": b"x" * 5000 + b"\ncloudflared_tunnel_ha_connections lots\n", "/health": b'{"ok":true}'}
+
+
+class _H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = PAGES.get(self.path)
+        self.send_response(200 if body is not None else 404)
+        self.end_headers()
+        self.wfile.write(body or b"")
+
+    def log_message(self, *a):
+        pass
+
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = "http://127.0.0.1:%d" % srv.server_address[1]
+check("fake page puts the line past 4 KB", BIG_METRICS.index(b"cloudflared_tunnel_ha_connections") > 4096)
+check("a 4 KB read misses it (the old bug)", b"cloudflared_tunnel_ha_connections" not in b._get(base + "/metrics", 2)[2])
+check("edge read from a big real page", b._edge_connections(2, metrics_url=base + "/metrics") == 4.0)
+t = b.tunnel(rivia_dir=rivia, proc=proc, public_url=base + "/health", local_url=base + "/health",
+             metrics_url=base + "/metrics")
+check("tunnel() reads edge 4 from the big page", t["edge_connections"] == 4.0 and t["tunnel_unreachable"] == 0.0)
+check("page without the line: edge None", b._edge_connections(2, metrics_url=base + "/nometrics") is None)
+check("garbled value: edge None, no crash", b._edge_connections(2, metrics_url=base + "/garbled") is None)
+check("metrics page 404: edge None", b._edge_connections(2, metrics_url=base + "/missing") is None)
+srv.shutdown()
+srv.server_close()
+check("metrics server gone: edge None, no crash", b._edge_connections(1, metrics_url=base + "/metrics") is None)
 
 # ---- vitals ----
 write(os.path.join(power, "temp"), "312\n")
