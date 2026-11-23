@@ -968,6 +968,14 @@ def archive_entries(kind):
             data = _read_file(path)
             if data is not None:
                 entries.append((arc, data))
+        # Settings and logs the app edits (Step 5's progress_overrides.json / progress_edits.jsonl, Step 6's
+        # trust_*.json / trust_edits.jsonl, and any later ones): every top-level .json and .jsonl in ~/rivia.
+        for f in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
+            full = os.path.join(rdir, f)
+            if f.endswith((".json", ".jsonl")) and f != "places.json" and ".bak" not in f and os.path.isfile(full):
+                data = _read_file(full)
+                if data is not None:
+                    entries.append(("state/" + f, data))
     elif kind == "secrets":
         for f in sorted(os.listdir(dot)) if os.path.isdir(dot) else []:
             full = os.path.join(dot, f)

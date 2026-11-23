@@ -58,6 +58,11 @@ _w(os.path.join(RIVIA, "places.json"), "{}\n")
 _w(os.path.join(RIVIA, "logs", "server.log"), "INFO: started\n")
 _w(os.path.join(RIVIA, "g2audio", "big.apk"), b"apk")
 _w(os.path.join(RIVIA, "core.db.bak-old-1"), b"SQLite format 3\0old")
+_w(os.path.join(RIVIA, "progress_overrides.json"), '{"gap.weights.rule_breaks": 0.4}')
+_w(os.path.join(RIVIA, "progress_edits.jsonl"), '{"at": 1, "set": {}}\n')
+_w(os.path.join(RIVIA, "trust_unlocks.json"), "{}")
+_w(os.path.join(RIVIA, "trust_edits.jsonl"), "")
+_w(os.path.join(RIVIA, "trust_overrides.json.bak-old-1"), "{}")
 
 import rivia_gcal as g
 import rivia_planner as rp
@@ -357,7 +362,7 @@ ok([c["from"] for c in fake.copies] == ["legacy-file"] and fake.copies[0]["paren
    "the old rivia-scheduler.db is copied into the History Ledger before it is updated")
 in_ledger = sorted(u["name"] for u in fake.uploads if u.get("parents") == [ledger_id])
 ok(in_ledger == sorted(["code rivia_server.py.bak-old-1", "code-tests test_x.py.bak-old-1", "data core.db.bak-old-1",
-                        "dotdir .env.bak-old-1", "shared rivia.bak-step1.tar.gz"]),
+                        "data trust_overrides.json.bak-old-1", "dotdir .env.bak-old-1", "shared rivia.bak-step1.tar.gz"]),
    "every .bak* copy (and the old rivia.bak-* folder) goes into the History Ledger once: %s" % in_ledger)
 
 
@@ -371,6 +376,10 @@ code_tar = tar_names(by_db["code"]["drive_file_id"])
 ok({"MANIFEST.txt", "code/rivia_server.py", "code/tests/test_x.py", "code/docs/notes.md",
     "config/cloudflared-config.yml", "config/places.json"} <= set(code_tar),
    "rivia-code.tar.gz has the code folder, cloudflared config.yml and places.json")
+ok({"state/progress_overrides.json", "state/progress_edits.jsonl", "state/trust_unlocks.json",
+    "state/trust_edits.jsonl"} <= set(code_tar) and "state/places.json" not in code_tar,
+   "rivia-code.tar.gz has the app's settings and edit logs (Step 5 progress_*, Step 6 trust_*) under state/")
+ok(code_tar["state/progress_overrides.json"] == b'{"gap.weights.rule_breaks": 0.4}', "the settings file goes in whole")
 ok(not [n for n in code_tar if ".bak" in n or "__pycache__" in n or "token" in n or n.endswith(".pem")],
    "rivia-code.tar.gz has no .bak copies, __pycache__ or token/key files")
 sec_tar = tar_names(by_db["secrets"]["drive_file_id"])
