@@ -18,6 +18,8 @@
 # It is not a Gemini tool and it is on no door (4.8). It changes no mood (4.4 to 4.6 read body.db on their own).
 # Step 5.6: after 4.9's dials, rivia_progress logs the plan-accuracy trend to body.db in shadow (RIVIA_PLAN_SHADOW=0
 # turns it off). It reads the scheduler's files read-only and never writes them.
+# Step 6: after Step 5, rivia_trust_shadow judges her plans and works out trust in shadow (RIVIA_TRUST_SHADOW=0
+# switches it off).
 import asyncio
 import json
 import os
@@ -34,6 +36,10 @@ try:  # Step 5.6 plan-accuracy trend in shadow mode: same rule, the collector ne
     import rivia_progress as progress
 except Exception:  # noqa: BLE001
     progress = None
+try:  # Step 6 trust and accuracy in shadow mode: same rule, the collector never depends on it
+    import rivia_trust_shadow as trust_shadow
+except Exception:  # noqa: BLE001
+    trust_shadow = None
 import rivia_store as store
 
 INTERVAL_S = 60          # one reading a minute: 15 samples in each of 4.3's 15-minute windows
@@ -141,6 +147,15 @@ def collect_once(con=None, now=None, read=None):
                                    "would_read": res["mood"]["would_read"]}
                 except Exception as e:  # noqa: BLE001
                     out["plan_error"] = type(e).__name__
+            # Step 6: judge the days Step 5 just scored, then trust, satisfaction and the unlock ladder. After
+            # Step 5 so a newly scored day is there. Logged to body.db only; a failure is noted and changes nothing.
+            if trust_shadow is not None and trust_shadow.enabled():
+                try:
+                    res6 = trust_shadow.shadow_tick(con, now_epoch)
+                    out["trust"] = {"judged": res6["judged"], "trust": res6["trust"]["value"],
+                                    "satisfaction": res6["satisfaction"]["value"], "killed": res6["killed"]}
+                except Exception as e:  # noqa: BLE001
+                    out["trust_error"] = type(e).__name__
         except Exception as e:  # noqa: BLE001
             out["error"] = type(e).__name__
         out["took_ms"] = int((time.perf_counter() - t0) * 1000)
