@@ -382,8 +382,8 @@ async def run_parked(signin=None):
 
 asyncio.run(run_parked())
 ok(len(ran) == 1 and ran[0]["mark_ran"] is True, "parked timer: 05:30 slot still runs the sign-in check")
-ok(parked["backup"] == 1 and parked["backup_kw"] == [{"only": ("core",)}],
-   "parked timer: 05:30 slot backs up core.db only")
+ok(parked["backup"] == 1 and parked["backup_kw"] == [{}],
+   "parked timer: 05:30 slot runs the full Drive backup after the sign-in check")
 ok(parked["tick"] == 0, "parked timer: no morning tick (no auto-write or tomorrow proposal)")
 ok(parked["evening"] == 0, "parked timer: 21:00 evening refresh skipped")
 ok(gcal.last_signin_check_day() == NOW.strftime("%Y-%m-%d"), "parked timer: today's run is recorded")

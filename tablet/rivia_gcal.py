@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -86,6 +87,15 @@ DRIVE_BACKUP_NAME = "rivia-scheduler.db"
 DRIVE_BACKUP_MIME = "application/octet-stream"
 def events_url():
     return os.environ.get("RIVIA_GOOGLE_EVENTS_URL", EVENTS_URL)
+
+
+DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+LEDGER_FOLDER_NAME = "Rivia (History Ledger)"
+
+
+def drive_files_url():
+    return (os.environ.get("RIVIA_GOOGLE_DRIVE_FILES_URL", DRIVE_FILES_URL) or DRIVE_FILES_URL).rstrip("/")
 
 
 def drive_upload_url():
@@ -552,7 +562,7 @@ def signin_check_enabled():
 
 def sched_timer_enabled():
     """RIVIA_SCHED_TIMER=0 parks scheduling's part of the daily timer: the 05:30 slot runs only
-    the sign-in check and a Drive backup of core.db only (no auto-write or tomorrow proposal),
+    the sign-in check and then the full Drive backup (no auto-write or tomorrow proposal),
     and the 21:00 evening refresh is skipped."""
     return os.environ.get("RIVIA_SCHED_TIMER", "1").strip().lower() not in ("0", "false", "off", "no")
 
@@ -640,7 +650,7 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
                     print("rivia: sign-in check failed (%s); continuing." % type(e).__name__,
                           file=sys.stderr)
                 try:
-                    run_drive_backup(only=("core",))
+                    run_drive_backup()
                 except Exception as e:  # noqa: BLE001
                     print("rivia: daily Drive backup failed (%s); continuing." % type(e).__name__,
                           file=sys.stderr)
@@ -772,15 +782,19 @@ def _multipart_related(metadata, raw, mime):
     return b"".join(chunks), "multipart/related; boundary=%s" % boundary
 
 
-def upload_scheduler_db(path, *, file_id=None, name=None, token=None):
-    """Create or update the Drive backup file with drive.file (multipart, urllib)."""
+def upload_scheduler_db(path, *, file_id=None, name=None, token=None, parents=None, raw=None):
+    """Create or update the Drive backup file with drive.file (multipart, urllib). parents (new files
+    only) puts a new file in a folder; raw uploads those bytes instead of reading path."""
     if token is None:
         token, _ = access_token()
     name = name or drive_backup_name()
-    with open(path, "rb") as f:
-        raw = f.read()
-    body, content_type = _multipart_related(
-        {"name": name, "mimeType": DRIVE_BACKUP_MIME}, raw, DRIVE_BACKUP_MIME)
+    if raw is None:
+        with open(path, "rb") as f:
+            raw = f.read()
+    meta = {"name": name, "mimeType": DRIVE_BACKUP_MIME}
+    if parents and not file_id:
+        meta["parents"] = list(parents)
+    body, content_type = _multipart_related(meta, raw, DRIVE_BACKUP_MIME)
     if file_id:
         url = "%s/%s?uploadType=multipart" % (
             drive_upload_url(), urllib.parse.quote(str(file_id), safe=""))
@@ -815,12 +829,56 @@ def upload_scheduler_db(path, *, file_id=None, name=None, token=None):
 # Drive backup (core split): each part's DB goes to its own Drive file. A DB is uploaded when
 # its content changed since its last upload (a hash of its rows; the backup's own bookkeeping
 # rows, meta keys drive_*, are left out so recording an upload never causes another one).
-BACKUP_DBS = ("places", "scheduler", "approvals", "core")
+BACKUP_DBS = ("places", "scheduler", "approvals", "core", "emotion", "body", "auth")
 DRIVE_NAMES = {"places": "rivia-places.db", "scheduler": DRIVE_BACKUP_NAME,
-               "approvals": "rivia-approvals.db", "core": "rivia-core.db"}
+               "approvals": "rivia-approvals.db", "core": "rivia-core.db",
+               "emotion": "rivia-emotion.db", "body": "rivia-body.db", "auth": "rivia-auth.db",
+               "code": "rivia-code.tar.gz", "secrets": "rivia-secrets.tar.gz", "logs": "rivia-logs.tar.gz"}
+# Full backup (Jordan, Nov 23: "include everything, secrets too ... and the .bak-* copies"): every .db,
+# the code folder and config, the secrets (.env, tokens, keys, tunnel credentials) in their own archive,
+# and the logs. Older versions are never overwritten or deleted: before a Drive file is updated, its
+# current version is copied into the "Rivia (History Ledger)" folder, and every .bak* copy goes there once.
+ARCHIVES = ("code", "secrets", "logs")
+NOT_BACKED_UP = (
+    "~/rivia/backup (the local snapshots this backup makes)",
+    "~/rivia/g2audio (about 400 MB of Android app files, not Rivia data)",
+    "__pycache__ (compiled Python, rebuilt on start)",
+    "*.pid, *.db-wal and *.db-shm (live run files; each .db is copied whole with sqlite's backup API)",
+)
+_SECRET_FILE = re.compile(r"(token|secret|credential|\.env$|\.pem$|\.key$)", re.I)
+
+
+def _backup_names():
+    """The DBs to back up: the known parts, then any other .db in ~/rivia."""
+    names = list(BACKUP_DBS)
+    try:
+        for f in sorted(os.listdir(_store().rivia_dir())):
+            if f.endswith(".db") and f[:-3] not in names:
+                names.append(f[:-3])
+    except OSError:
+        pass
+    return names
+
+
+def _drive_name(name):
+    return DRIVE_NAMES.get(name) or "rivia-%s.db" % name
+
+
+def _db_path(name):
+    if name == "auth":
+        import rivia_auth
+        return rivia_auth.DB_PATH
+    return os.path.join(_store().rivia_dir(), name + ".db")
 
 
 def _open_part_db(name):
+    if name not in ("places", "approvals", "core", "scheduler"):
+        # Read-only and never created: a backup must not change emotion.db, body.db, auth.db or any other DB.
+        import sqlite3
+        path = _db_path(name)
+        if not os.path.exists(path):
+            return None
+        return sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=10)
     if name == "places":
         import rivia_places
         return rivia_places.db_open()
@@ -859,6 +917,190 @@ def _snapshot(con, name):
     return path
 
 
+def _code_dir():
+    return os.environ.get("RIVIA_CODE_DIR") or os.path.dirname(os.path.abspath(__file__))
+
+
+def _cloudflared_dir():
+    return os.environ.get("RIVIA_CLOUDFLARED_DIR") or os.path.expanduser("~/.cloudflared")
+
+
+def _files_under(folder, arc_prefix, skip_secret=False, only_secret=False):
+    """(arc path, bytes) for the files under folder: no __pycache__, no .bak* copies (those go to the
+    History Ledger), no symlinks. skip_secret / only_secret split token and key files out of the code."""
+    out = []
+    if not os.path.isdir(folder):
+        return out
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and ".bak" not in d)
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            secret = bool(_SECRET_FILE.search(f))
+            if ".bak" in f or os.path.islink(full) or f.endswith(".pyc") or (skip_secret and secret) \
+                    or (only_secret and not secret):
+                continue
+            try:
+                with open(full, "rb") as fh:
+                    out.append((arc_prefix + os.path.relpath(full, folder), fh.read()))
+            except OSError:
+                pass
+    return out
+
+
+def _read_file(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def archive_entries(kind):
+    """Sorted (path in the archive, bytes) for "code", "secrets" or "logs"."""
+    import rivia_auth
+    import rivia_google
+    rdir, dot, cf = _store().rivia_dir(), rivia_auth.dot_dir(), _cloudflared_dir()
+    entries = []
+    if kind == "code":
+        entries += _files_under(_code_dir(), "code/", skip_secret=True)
+        for arc, path in (("config/cloudflared-config.yml", os.path.join(cf, "config.yml")),
+                          ("config/places.json", os.path.join(rdir, "places.json"))):
+            data = _read_file(path)
+            if data is not None:
+                entries.append((arc, data))
+    elif kind == "secrets":
+        for f in sorted(os.listdir(dot)) if os.path.isdir(dot) else []:
+            full = os.path.join(dot, f)
+            if ".bak" not in f and os.path.isfile(full):
+                data = _read_file(full)
+                if data is not None:
+                    entries.append(("secrets/rivia-dotdir/" + f, data))
+        gtok = rivia_google.token_path()
+        if not os.path.abspath(gtok).startswith(os.path.abspath(dot) + os.sep):
+            data = _read_file(gtok)
+            if data is not None:
+                entries.append(("secrets/google_token.json", data))
+        data = _read_file(os.path.join(rdir, "app-token.txt"))
+        if data is not None:
+            entries.append(("secrets/rivia-data/app-token.txt", data))
+        entries += _files_under(_code_dir(), "secrets/code/", only_secret=True)
+        for f in sorted(os.listdir(cf)) if os.path.isdir(cf) else []:
+            full = os.path.join(cf, f)
+            if ".bak" not in f and os.path.isfile(full):
+                data = _read_file(full)
+                if data is not None:
+                    entries.append(("secrets/cloudflared/" + f, data))
+    elif kind == "logs":
+        entries += _files_under(os.path.join(rdir, "logs"), "logs/")
+    entries.sort()
+    return entries
+
+
+def _entries_hash(entries):
+    h = hashlib.sha256()
+    for arc, data in entries:
+        h.update(arc.encode("utf-8") + b"\0" + hashlib.sha256(data).digest())
+    return h.hexdigest()
+
+
+def _tar_gz(entries, path, manifest=None):
+    import io
+    import tarfile
+    tmp = path + ".tmp"
+    items = ([("MANIFEST.txt", manifest.encode("utf-8"))] if manifest else []) + list(entries)
+    with tarfile.open(tmp, "w:gz") as tar:
+        for arc, data in items:
+            info = tarfile.TarInfo(arc)
+            info.size = len(data)
+            info.mtime = int(time.time())
+            info.mode = 0o600
+            tar.addfile(info, io.BytesIO(data))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
+def _write_archive(kind, entries):
+    folder = os.path.join(_store().rivia_dir(), "backup")
+    os.makedirs(folder, exist_ok=True)
+    manifest = "Rivia %s backup\n\nIncluded:\n%s\n\nNot backed up anywhere:\n%s\n" % (
+        kind, "\n".join("  " + a for a, _ in entries), "\n".join("  " + x for x in NOT_BACKED_UP))
+    return _tar_gz(entries, os.path.join(folder, kind + ".tar.gz"), manifest)
+
+
+def bak_items():
+    """Every .bak* copy Rivia keeps, as (key, Drive name, path, is_folder): files in ~/rivia, ~/.rivia and
+    the code folder (and its tests/), and the old rivia.bak-* code folders next to the code folder."""
+    import rivia_auth
+    out = []
+    code = _code_dir()
+    for label, folder in (("data", _store().rivia_dir()), ("dotdir", rivia_auth.dot_dir()),
+                          ("code", code), ("code-tests", os.path.join(code, "tests"))):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for f in names:
+            full = os.path.join(folder, f)
+            if ".bak" in f and os.path.isfile(full) and not os.path.islink(full):
+                out.append(("%s/%s" % (label, f), "%s %s" % (label, f), full, False))
+    parent = os.path.dirname(os.path.abspath(code))
+    try:
+        for f in sorted(os.listdir(parent)):
+            full = os.path.join(parent, f)
+            if f.startswith(os.path.basename(os.path.abspath(code)) + ".bak") and os.path.isdir(full):
+                out.append(("shared/%s" % f, "shared %s.tar.gz" % f, full, True))
+    except OSError:
+        pass
+    return out
+
+
+def _drive_api(method, url, token, payload=None):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Authorization": "Bearer " + token}
+    if data is not None:
+        headers["Content-Type"] = "application/json; charset=UTF-8"
+    status, _, resp = http_request(method, url, headers=headers, data=data)
+    try:
+        obj = json.loads((resp or b"{}").decode() or "{}")
+    except ValueError:
+        obj = {}
+    return status, obj
+
+
+def _ledger_folder(scon, token):
+    """The "Rivia (History Ledger)" folder's id, created once (at the top of My Drive; Jordan moves it
+    into his Rivia folder, and Rivia keeps using it by id)."""
+    fid = _store().get_meta(scon, "drive_ledger_folder_id")
+    if fid:
+        st, obj = _drive_api("GET", "%s/%s?fields=id,trashed" % (drive_files_url(), urllib.parse.quote(fid, safe="")), token)
+        if st == 200 and not obj.get("trashed"):
+            return fid
+    st, obj = _drive_api("POST", "%s?fields=id,name" % drive_files_url(), token,
+                         {"name": LEDGER_FOLDER_NAME, "mimeType": DRIVE_FOLDER_MIME})
+    if st not in (200, 201) or not obj.get("id"):
+        raise GcalError("drive_http", "Could not create the History Ledger folder: HTTP %s" % st, step="drive")
+    _store().set_meta(scon, "drive_ledger_folder_id", obj["id"])
+    return obj["id"]
+
+
+def _ledger_copy(file_id, name, ledger_id, token):
+    """Copy the Drive file's current version into the History Ledger before it is replaced."""
+    q = urllib.parse.quote(str(file_id), safe="")
+    st, meta = _drive_api("GET", "%s/%s?fields=id,modifiedTime,size" % (drive_files_url(), q), token)
+    if st == 404:
+        return None  # nothing there to keep; the update below reports the missing file
+    if st != 200:
+        raise GcalError("drive_http", "Could not read %s before keeping a copy: HTTP %s" % (name, st), step="drive")
+    stamp = (meta.get("modifiedTime") or "")[:19].replace("T", " ") or "unknown time"
+    st, obj = _drive_api("POST", "%s/%s/copy?fields=id,name,size" % (drive_files_url(), q), token,
+                         {"name": "%s (%s UTC)" % (name, stamp), "parents": [ledger_id]})
+    if st not in (200, 201) or not obj.get("id"):
+        raise GcalError("drive_http", "Could not copy %s into the History Ledger: HTTP %s" % (name, st), step="drive")
+    return {"name": obj.get("name"), "drive_file_id": obj["id"], "bytes": int(meta.get("size") or 0),
+            "kind": "previous version"}
+
+
 def _drive_file_id(scon, name):
     fid = _store().get_meta(scon, "drive_file_id." + name)
     if not fid and name == "scheduler":
@@ -867,12 +1109,16 @@ def _drive_file_id(scon, name):
 
 
 def run_drive_backup(*, force=False, only=None):
-    """Back up every part's DB (places, scheduler, approvals, core) to Drive, each to its own
-    file, when it changed since its last upload. only=("core",) limits it to those names. A new, empty places.db is never uploaded over
+    """Back up all of Rivia to Drive: every .db (places, scheduler, approvals, core, emotion, body, auth and
+    any other .db in ~/rivia), each to its own file, plus rivia-code.tar.gz, rivia-secrets.tar.gz and
+    rivia-logs.tar.gz, each when it changed since its last upload. Before a Drive file is updated, its
+    current version is copied into the History Ledger; every .bak* copy goes there once. Nothing in Drive
+    is deleted. only=("core",) limits it to those names. A new, empty places.db is never uploaded over
     the Drive copy (restore_first). An existing read-only token is left in place; missing
     drive.file returns needs_relogin instead of crashing."""
     import rivia_places
-    out = {"ok": True, "uploaded": False, "written": False, "files": []}
+    out = {"ok": True, "uploaded": False, "written": False, "files": [], "ledger": [],
+           "not_backed_up": list(NOT_BACKED_UP)}
     try:
         try:
             tokens = load_tokens()
@@ -889,22 +1135,41 @@ def run_drive_backup(*, force=False, only=None):
         scon = _sched_db()
         try:
             todo = []
-            for name in BACKUP_DBS:
+            for name in _backup_names():
                 if only is not None and name not in only:
                     continue
                 con = _open_part_db(name)
+                if con is None:
+                    continue
                 try:
                     digest = _content_hash(con)
                     if force or digest != _store().get_meta(scon, "drive_hash." + name):
                         todo.append((name, _snapshot(con, name), digest))
                 finally:
                     con.close()
-            if not todo:
+            for kind in ARCHIVES:
+                if only is not None and kind not in only:
+                    continue
+                entries = archive_entries(kind)
+                digest = _entries_hash(entries)
+                if entries and (force or digest != _store().get_meta(scon, "drive_hash." + kind)):
+                    todo.append((kind, _write_archive(kind, entries), digest))
+            baks = [] if only is not None else [
+                b for b in bak_items() if not _store().get_meta(scon, "drive_bak." + b[0])]
+            if not todo and not baks:
                 out["reason"] = out["message"] = "No new rides or changes since the last upload."
                 return out
             require_scopes(SCOPE_DRIVE_FILE, tokens=tokens)
+            token, _ = access_token()
+            ledger_id = _ledger_folder(scon, token)
+            out["ledger_folder_id"] = ledger_id
             for name, path, digest in todo:
-                uploaded = upload_scheduler_db(path, file_id=_drive_file_id(scon, name), name=DRIVE_NAMES[name])
+                fid = _drive_file_id(scon, name)
+                if fid:
+                    kept = _ledger_copy(fid, _drive_name(name), ledger_id, token)
+                    if kept:
+                        out["ledger"].append(kept)
+                uploaded = upload_scheduler_db(path, file_id=fid, name=_drive_name(name), token=token)
                 try:
                     _store().set_meta(scon, "drive_file_id." + name, uploaded["id"])
                     _store().set_meta(scon, "drive_hash." + name, digest)
@@ -912,13 +1177,24 @@ def run_drive_backup(*, force=False, only=None):
                 except Exception as e:  # noqa: BLE001
                     print("rivia: could not record the Drive upload of %s (%s); continuing." % (name, type(e).__name__),
                           file=sys.stderr)
-                out["files"].append({"db": name, "name": uploaded.get("name") or DRIVE_NAMES[name],
+                out["files"].append({"db": name, "name": uploaded.get("name") or _drive_name(name),
                                      "drive_file_id": uploaded["id"], "modifiedTime": uploaded.get("modifiedTime"),
                                      "bytes": os.path.getsize(path)})
+            for key, dname, path, is_folder in baks:
+                if is_folder:
+                    entries = _files_under(path, os.path.basename(path) + "/")
+                    folder = os.path.join(_store().rivia_dir(), "backup")
+                    os.makedirs(folder, exist_ok=True)
+                    path = _tar_gz(entries, os.path.join(folder, "bak-folder.tar.gz"))
+                up = upload_scheduler_db(path, name=dname, token=token, parents=[ledger_id])
+                _store().set_meta(scon, "drive_bak." + key, up["id"])
+                out["ledger"].append({"name": up.get("name") or dname, "drive_file_id": up["id"],
+                                      "bytes": os.path.getsize(path), "kind": ".bak copy"})
         finally:
             scon.close()
         out["uploaded"] = True
-        out["message"] = "Uploaded %s to Drive." % ", ".join(f["db"] + ".db" for f in out["files"])
+        out["message"] = "Uploaded %s to Drive; %d item(s) to the History Ledger." % (
+            ", ".join(f["name"] for f in out["files"]) or "nothing new", len(out["ledger"]))
         return out
     except GcalError as e:
         if e.code == "needs_relogin":

@@ -24,7 +24,14 @@ os.environ.update(
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
     RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
     RIVIA_SIGNIN_CHECK="0",
+    # the full Drive backup (after a ride) reads the code folder and ~/.cloudflared: throwaway copies here
+    RIVIA_CODE_DIR=os.path.join(TMP, "code"),
+    RIVIA_CLOUDFLARED_DIR=os.path.join(TMP, "cloudflared"),
 )
+for _d, _f in ((os.environ["RIVIA_CODE_DIR"], "rivia_server.py"), (os.environ["RIVIA_CLOUDFLARED_DIR"], "config.yml")):
+    os.makedirs(_d, exist_ok=True)
+    with open(os.path.join(_d, _f), "w") as _fh:
+        _fh.write("x\n")
 sys.path.insert(0, HERE)
 
 import rivia_gcal as gcal
@@ -109,6 +116,20 @@ class FakeGoogle:
         return 200, rec
 
 
+    def handle_meta(self, method, path, body):
+        """drive/v3/files: the History Ledger folder, a file's metadata, and copies into the ledger."""
+        rest = urlparse(path).path[len("/drive/v3/files"):].strip("/")
+        meta = json.loads(body.decode() or "{}") if body else {}
+        if method == "POST":
+            fid = "drive-meta-%d" % self.next_id
+            self.next_id += 1
+            self.files[fid] = {"id": fid, "name": meta.get("name"), "modifiedTime": "2026-11-16T12:00:00.000Z"}
+            return 200, {"id": fid, "name": meta.get("name"), "size": "0"}
+        if rest in self.files:
+            return 200, dict(self.files[rest], size="0", trashed=False)
+        return 404, {"error": "not found"}
+
+
 fake = FakeGoogle()
 
 
@@ -135,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(*fake.handle_token(body))
         elif "/upload/drive/" in self.path:
             self._send(*fake.handle_drive("POST", self.path, self.headers, body))
+        elif self.path.startswith("/drive/v3/files"):
+            self._send(*fake.handle_meta("POST", self.path, body))
         else:
             self._send(404, {"error": "no post"})
 
@@ -148,6 +171,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/events") or "/calendar/" in self.path:
             self._send(*fake.handle_events(self.headers))
+        elif self.path.startswith("/drive/v3/files"):
+            self._send(*fake.handle_meta("GET", self.path, b""))
         else:
             self._send(404, {"error": "no get"})
 
@@ -161,6 +186,7 @@ port = httpd.server_address[1]
 os.environ["RIVIA_GOOGLE_TOKEN_URL"] = "http://127.0.0.1:%d/token" % port
 os.environ["RIVIA_GOOGLE_EVENTS_URL"] = "http://127.0.0.1:%d/events" % port
 os.environ["RIVIA_GOOGLE_DRIVE_UPLOAD_URL"] = "http://127.0.0.1:%d/upload/drive/v3/files" % port
+os.environ["RIVIA_GOOGLE_DRIVE_FILES_URL"] = "http://127.0.0.1:%d/drive/v3/files" % port
 gcal.save_tokens({
     "refresh_token": "refresh-good", "access_token": "access-good",
     "expiry": time.time() + 3600, "scope": gcal.SCOPE_ALL, "token_type": "Bearer",

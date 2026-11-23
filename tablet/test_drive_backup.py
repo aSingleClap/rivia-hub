@@ -24,8 +24,40 @@ os.environ.update(
     RIVIA_PASS_HASH=_salt.hex() + "$" + hashlib.scrypt(b"x" * 16, salt=_salt, n=2**14, r=8, p=1).hex(),
     RIVIA_TOTP_SECRET=base64.b32encode(secrets.token_bytes(20)).decode().rstrip("="),
     RIVIA_SIGNIN_CHECK="0",
+    RIVIA_CODE_DIR=os.path.join(TMP, "shared", "rivia"),
+    RIVIA_CLOUDFLARED_DIR=os.path.join(TMP, "cloudflared"),
 )
 sys.path.insert(0, HERE)
+
+
+def _w(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data if isinstance(data, bytes) else data.encode())
+
+
+CODE = os.environ["RIVIA_CODE_DIR"]
+_w(os.path.join(CODE, "rivia_server.py"), "print('server')\n")
+_w(os.path.join(CODE, "tests", "test_x.py"), "x = 1\n")
+_w(os.path.join(CODE, "docs", "notes.md"), "notes\n")
+_w(os.path.join(CODE, "app-token.txt"), "eyJcode.token\n")
+_w(os.path.join(CODE, "rivia_server.py.bak-old-1"), "old server\n")
+_w(os.path.join(CODE, "tests", "test_x.py.bak-old-1"), "old test\n")
+_w(os.path.join(CODE, "__pycache__", "rivia_server.cpython-314.pyc"), b"\0pyc")
+_w(os.path.join(TMP, "shared", "rivia.bak-step1", "rivia_server.py"), "step1 server\n")
+CF = os.environ["RIVIA_CLOUDFLARED_DIR"]
+_w(os.path.join(CF, "config.yml"), "tunnel: abc\ncredentials-file: /x/abc.json\n")
+_w(os.path.join(CF, "cert.pem"), "-----BEGIN CERT-----\n")
+_w(os.path.join(CF, "abc.json"), '{"TunnelSecret": "s3cret"}')
+_w(os.path.join(DOT, ".env"), "RIVIA_JWT_KEY=jwt-secret-value\nRIVIA_SCHED_TIMER=0\n")
+_w(os.path.join(DOT, "admin_token"), "admin-token-value\n")
+_w(os.path.join(DOT, ".env.bak-old-1"), "RIVIA_JWT_KEY=older\n")
+RIVIA = os.environ["RIVIA_DIR"]
+_w(os.path.join(RIVIA, "app-token.txt"), "eyJdata.token\n")
+_w(os.path.join(RIVIA, "places.json"), "{}\n")
+_w(os.path.join(RIVIA, "logs", "server.log"), "INFO: started\n")
+_w(os.path.join(RIVIA, "g2audio", "big.apk"), b"apk")
+_w(os.path.join(RIVIA, "core.db.bak-old-1"), b"SQLite format 3\0old")
 
 import rivia_gcal as g
 import rivia_planner as rp
@@ -57,6 +89,8 @@ class FakeGoogle:
         }]
         self.files = {}
         self.uploads = []  # (method, file_id)
+        self.copies = []
+        self.deletes = []
         self.next_id = 1
         self.clock = 0
         self.reject_drive = False
@@ -111,15 +145,56 @@ class FakeGoogle:
             name = json.loads(meta.decode()).get("name") or name
         except Exception:  # noqa: BLE001
             pass
+        parents = None
+        try:
+            parents = json.loads((body or b"").split(b"\r\n\r\n", 1)[1].split(b"\r\n", 1)[0].decode()).get("parents")
+        except Exception:  # noqa: BLE001
+            pass
+        content = b""
+        try:  # the media part: after the second part's headers, up to the closing boundary
+            boundary = (body or b"").split(b"\r\n", 1)[0]
+            content = body.split(boundary)[2].split(b"\r\n\r\n", 1)[1][:-2]
+        except Exception:  # noqa: BLE001
+            pass
+        old = self.files.get(file_id) or {}
         rec = {
             "id": file_id,
             "name": name,
             "modifiedTime": modified,
-            "bytes": len(body or b""),
+            "bytes": len(content),
+            "content": content,
+            "parents": parents if method == "POST" else old.get("parents"),
         }
         self.files[file_id] = rec
-        self.uploads.append({"method": method, "id": file_id, "name": name, "modifiedTime": modified})
+        self.uploads.append({"method": method, "id": file_id, "name": name, "modifiedTime": modified,
+                             "parents": rec["parents"]})
         return 200, {"id": file_id, "name": rec["name"], "modifiedTime": modified}
+
+
+    def handle_meta(self, method, path, body):
+        """drive/v3/files: create a folder, copy a file, read a file's metadata."""
+        rest = urlparse(path).path[len("/drive/v3/files"):].strip("/")
+        meta = json.loads(body.decode() or "{}") if body else {}
+        if method == "POST" and not rest:
+            fid = "drive-folder-%d" % self.next_id
+            self.next_id += 1
+            self.files[fid] = {"id": fid, "name": meta.get("name"), "mimeType": meta.get("mimeType"),
+                               "modifiedTime": self._modified(), "bytes": 0, "content": b"", "parents": None}
+            return 200, {"id": fid, "name": meta.get("name")}
+        if method == "POST" and rest.endswith("/copy"):
+            src = self.files.get(rest[:-len("/copy")])
+            if not src:
+                return 404, {"error": "not found"}
+            fid = "drive-copy-%d" % self.next_id
+            self.next_id += 1
+            self.files[fid] = dict(src, id=fid, name=meta.get("name"), parents=meta.get("parents"))
+            self.copies.append({"from": src["id"], "id": fid, "name": meta.get("name"), "parents": meta.get("parents")})
+            return 200, {"id": fid, "name": meta.get("name"), "size": str(src.get("bytes", 0))}
+        if method == "GET" and rest in self.files:
+            f = self.files[rest]
+            return 200, {"id": f["id"], "name": f["name"], "modifiedTime": f.get("modifiedTime") or "2026-11-01T00:00:00.000Z",
+                         "size": str(f.get("bytes", 0)), "trashed": False}
+        return 404, {"error": "not found"}
 
 
 fake = FakeGoogle()
@@ -152,6 +227,10 @@ class Handler(BaseHTTPRequestHandler):
             status, obj = fake.handle_drive("POST", self.path, self.headers, body)
             self._send(status, obj)
             return
+        if self.path.startswith("/drive/v3/files"):
+            status, obj = fake.handle_meta("POST", self.path, body)
+            self._send(status, obj)
+            return
         self._send(404, {"error": "no post"})
 
     def do_PATCH(self):
@@ -167,7 +246,15 @@ class Handler(BaseHTTPRequestHandler):
             status, obj = fake.handle_events(self.headers)
             self._send(status, obj)
             return
+        if self.path.startswith("/drive/v3/files"):
+            status, obj = fake.handle_meta("GET", self.path, b"")
+            self._send(status, obj)
+            return
         self._send(404, {"error": "no get"})
+
+    def do_DELETE(self):
+        fake.deletes.append(self.path)
+        self._send(405, {"error": "this test's Drive refuses deletes"})
 
     def log_message(self, *a):
         pass
@@ -179,6 +266,7 @@ port = httpd.server_address[1]
 os.environ["RIVIA_GOOGLE_TOKEN_URL"] = "http://127.0.0.1:%d/token" % port
 os.environ["RIVIA_GOOGLE_EVENTS_URL"] = "http://127.0.0.1:%d/events" % port
 os.environ["RIVIA_GOOGLE_DRIVE_UPLOAD_URL"] = "http://127.0.0.1:%d/upload/drive/v3/files" % port
+os.environ["RIVIA_GOOGLE_DRIVE_FILES_URL"] = "http://127.0.0.1:%d/drive/v3/files" % port
 
 
 def save_token(scope):
@@ -247,15 +335,55 @@ first = g.run_drive_backup()
 ok(first["ok"] is True and first["uploaded"] is True, "first backup uploads")
 ok(first.get("rides") == 0, "first backup after start-fresh has 0 rides")
 by_db = {f["db"]: f for f in first["files"]}
-ok(set(by_db) == {"places", "scheduler", "approvals", "core"},
-   "every part's DB is backed up: places, scheduler, approvals, core")
-ok({u["name"] for u in fake.uploads} == {"rivia-places.db", "rivia-scheduler.db", "rivia-approvals.db", "rivia-core.db"},
-   "each DB goes to its own Drive file")
+ok(set(by_db) == {"places", "scheduler", "approvals", "core", "auth", "code", "secrets", "logs"},
+   "every part's DB plus the code, secrets and logs archives are backed up: %s" % sorted(by_db))
+main = {u["name"] for u in fake.uploads if not u.get("parents")}
+ok(main == {"rivia-places.db", "rivia-scheduler.db", "rivia-approvals.db", "rivia-core.db", "rivia-auth.db",
+            "rivia-code.tar.gz", "rivia-secrets.tar.gz", "rivia-logs.tar.gz"},
+   "each goes to its own Drive file in the main backup")
+ok(not os.path.exists(os.path.join(RIVIA, "emotion.db")) and not os.path.exists(os.path.join(RIVIA, "body.db")),
+   "a missing emotion.db or body.db is skipped, never created")
 ok(by_db["scheduler"]["drive_file_id"] == "legacy-file"
    and [u["method"] for u in fake.uploads if u["name"] == "rivia-scheduler.db"] == ["PATCH"],
    "scheduler.db updates the Drive file from before the split")
-ok(sorted(u["method"] for u in fake.uploads if u["name"] != "rivia-scheduler.db") == ["POST"] * 3,
-   "the three new DBs are created (POST)")
+ok(sorted(u["method"] for u in fake.uploads if u["name"] != "rivia-scheduler.db" and not u.get("parents")) == ["POST"] * 7,
+   "the other seven are created (POST)")
+ledger_id = first.get("ledger_folder_id")
+ledger = [f for f in fake.files.values() if f.get("mimeType") == "application/vnd.google-apps.folder"]
+ok(len(ledger) == 1 and ledger[0]["name"] == "Rivia (History Ledger)" and ledger[0]["id"] == ledger_id,
+   "the History Ledger folder is created once")
+ok([c["from"] for c in fake.copies] == ["legacy-file"] and fake.copies[0]["parents"] == [ledger_id]
+   and fake.copies[0]["name"].startswith("rivia-scheduler.db ("),
+   "the old rivia-scheduler.db is copied into the History Ledger before it is updated")
+in_ledger = sorted(u["name"] for u in fake.uploads if u.get("parents") == [ledger_id])
+ok(in_ledger == sorted(["code rivia_server.py.bak-old-1", "code-tests test_x.py.bak-old-1", "data core.db.bak-old-1",
+                        "dotdir .env.bak-old-1", "shared rivia.bak-step1.tar.gz"]),
+   "every .bak* copy (and the old rivia.bak-* folder) goes into the History Ledger once: %s" % in_ledger)
+
+
+def tar_names(file_id):
+    import io, tarfile
+    with tarfile.open(fileobj=io.BytesIO(fake.files[file_id]["content"])) as t:
+        return {m.name: t.extractfile(m).read() for m in t.getmembers()}
+
+
+code_tar = tar_names(by_db["code"]["drive_file_id"])
+ok({"MANIFEST.txt", "code/rivia_server.py", "code/tests/test_x.py", "code/docs/notes.md",
+    "config/cloudflared-config.yml", "config/places.json"} <= set(code_tar),
+   "rivia-code.tar.gz has the code folder, cloudflared config.yml and places.json")
+ok(not [n for n in code_tar if ".bak" in n or "__pycache__" in n or "token" in n or n.endswith(".pem")],
+   "rivia-code.tar.gz has no .bak copies, __pycache__ or token/key files")
+sec_tar = tar_names(by_db["secrets"]["drive_file_id"])
+ok({"secrets/rivia-dotdir/.env", "secrets/rivia-dotdir/admin_token", "secrets/rivia-dotdir/google_token.json",
+    "secrets/rivia-data/app-token.txt", "secrets/code/app-token.txt", "secrets/cloudflared/cert.pem",
+    "secrets/cloudflared/abc.json", "secrets/cloudflared/config.yml"} <= set(sec_tar),
+   "rivia-secrets.tar.gz has the .env, tokens, keys and tunnel credentials")
+ok(b"jwt-secret-value" in sec_tar["secrets/rivia-dotdir/.env"], "the .env goes in whole, secrets included")
+ok(not [n for n in sec_tar if ".bak" in n], "no .bak copies in the secrets archive (they go to the ledger)")
+ok(set(tar_names(by_db["logs"]["drive_file_id"])) == {"MANIFEST.txt", "logs/server.log"},
+   "rivia-logs.tar.gz has the logs")
+ok(not [n for t in (code_tar, sec_tar) for n in t if "g2audio" in n], "g2audio is never backed up")
+ok(not fake.deletes, "nothing in Drive is deleted")
 fid = by_db["places"]["drive_file_id"]
 ok(g._meta_get("drive_file_id.places") == fid and fid in fake.files, "the places file id is stored in scheduler meta")
 n_first = len(fake.uploads)
@@ -277,6 +405,27 @@ ok([f["db"] for f in updated["files"]] == ["places"], "only places.db changed, s
 ok(updated["files"][0]["drive_file_id"] == fid and fake.uploads[-1]["method"] == "PATCH",
    "the update uses the same Drive file id (PATCH)")
 ok(updated["files"][0]["modifiedTime"] > by_db["places"]["modifiedTime"], "the same file id has a newer modified time")
+ok(fake.copies[-1]["from"] == fid and fake.copies[-1]["parents"] == [ledger_id]
+   and fake.copies[-1]["name"].startswith("rivia-places.db (")
+   and [l["kind"] for l in updated["ledger"]] == ["previous version"],
+   "the previous rivia-places.db is copied into the History Ledger first, not overwritten")
+ok(not [u for u in fake.uploads[n_first:] if u.get("parents")], "a .bak copy already in the ledger is not sent again")
+
+# ── emotion.db, body.db and any other .db in ~/rivia: read-only copies, never changed ──
+import sqlite3 as _sq
+for _n in ("emotion", "body", "extra"):
+    _c = _sq.connect(os.path.join(RIVIA, _n + ".db"))
+    _c.execute("create table t(x)")
+    _c.execute("insert into t values (1)")
+    _c.commit()
+    _c.close()
+emo_before = open(os.path.join(RIVIA, "emotion.db"), "rb").read()
+more = g.run_drive_backup()
+ok(more["ok"] is True and {f["db"] for f in more["files"]} == {"emotion", "body", "extra"},
+   "emotion.db, body.db and another .db in ~/rivia are each backed up: %s" % [f["db"] for f in more["files"]])
+ok({f["name"] for f in more["files"]} == {"rivia-emotion.db", "rivia-body.db", "rivia-extra.db"},
+   "with their own Drive names")
+ok(open(os.path.join(RIVIA, "emotion.db"), "rb").read() == emo_before, "emotion.db is unchanged by the backup")
 
 # ── a new change in approvals.db uploads approvals.db only ──
 import rivia_approvals as _approvals
