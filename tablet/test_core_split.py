@@ -167,7 +167,7 @@ ok(r.returncode == 0, "the doors build without scheduling")
 ns = json.loads(r.stdout.strip().splitlines()[-1])
 ok(ns["loaded"]["loaded"] is False, "the server notes that scheduling did not load")
 ok(set(ns["names"]) == {"get_tablet_battery", "hub_status", "list_tools", "list_calls", "app_places",
-                        "app_arrival", "app_log_ride", "app_pin_place", "app_open"},
+                        "app_arrival", "app_log_ride", "app_pin_place", "app_open", "health_status"},
    "without scheduling the app door still has battery, the hub tools and the five places tools: %s" % ns["names"])
 res = ns["res"]
 ok(res["app_places"].get("ok") is True and len(res["app_places"]["data"]["places"]) == 5, "app_places works")
@@ -221,7 +221,7 @@ for _ in range(200):
 ok(server.started and PORT != 8787, "a test server is up on port %d (not the live 8787)" % PORT)
 APP_TOKEN = ra.mint_door_token("app")["token"]
 ADMIN_TOKEN = ra.mint_door_token("admin")["token"]
-EXPECTED = {"get_tablet_battery", "hub_status", "list_tools", "list_calls",
+EXPECTED = {"get_tablet_battery", "hub_status", "list_tools", "list_calls", "health_status",  # 4.8
             "app_places", "app_arrival", "app_log_ride", "app_pin_place", "app_open",
             "ride_time", "plan_day", "get_schedule_settings", "change_schedule_setting", "undo_schedule_change",
             "write_day"}

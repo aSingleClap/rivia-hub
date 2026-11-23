@@ -55,7 +55,6 @@ INTENSITY = {
 ADJECTIVE = {
     "joy": "happy",
     "anger": "angry",
-    "fear": "afraid",
     "sadness": "sad",
     "surprise": "surprised",
     "annoyance": "annoyed",
@@ -63,6 +62,8 @@ ADJECTIVE = {
     "relief": "relieved",
     "calm": "calm",
     "focused": "focused",
+    "distressed": "distressed",  # in place of fear (Jordan, Nov 22: no fear; distressed is fine)
+    "worried": "worried",        # Step 4.5 (Jordan, Nov 22: "Yes add worried"); plain style
 }
 
 # PLACEHOLDERS for Step 8's mood -> style map; not tuned, kept minimal. Anything unlisted is "plain".

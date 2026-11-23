@@ -73,8 +73,13 @@ calls = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isin
 ok("tool" not in calls and not {m for m in mods if m.startswith(("fastmcp", "mcp", "rivia_tools"))},
    "the button module registers no MCP tool and doesn't touch the tool table")
 users = [f for f in os.listdir(HERE) if f.endswith(".py") and not f.startswith("test_")
-         and f != "rivia_emotion.py" and '"app_button"' in open(os.path.join(HERE, f)).read()]
-ok(users == ["rivia_emotion_app.py"], "only rivia_emotion_app.py writes as app_button (%s)" % users)
+         and f != "rivia_emotion.py" and '"app_button"' in open(os.path.join(HERE, f)).read()
+         and "rivia_emotion" in {n for n in ast.walk(ast.parse(open(os.path.join(HERE, f)).read()))
+                                 for n in ([a.name for a in n.names] if isinstance(n, ast.Import) else
+                                           [n.module] if isinstance(n, ast.ImportFrom) else [])}]
+# 4.9 merge: Step 4.3's rivia_normal.py also names "app_button" (Jordan's reassure button), but it writes body.db
+# and never imports rivia_emotion, so it can't write her emotion. The guard is about emotion writers.
+ok(users == ["rivia_emotion_app.py"], "only rivia_emotion_app.py writes emotion as app_button (%s)" % users)
 server_src = open(os.path.join(HERE, "rivia_server.py")).read()
 ok("extra_routes=emotion_routes()" in server_src and "app_mcp.tool" not in server_src,
    "rivia_server hands the button to build_app as a route, not to app_mcp")

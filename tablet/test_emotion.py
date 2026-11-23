@@ -84,9 +84,9 @@ import math  # noqa: E402
 pts = emo.REFERENCE_POINTS
 ok(all(len(p) == 3 and all(isinstance(x, float) and math.isfinite(x) and -1 <= x <= 1 for x in p)
        for p in pts.values()), "every point is three finite numbers inside -1..+1")
-ok({"joy", "anger", "fear", "sadness", "surprise", "annoyance"} <= set(emo.RM1977) and "disgust" not in pts,
-   "the R&M emotions, with annoyance in place of disgust (Jordan, Nov 21)")
-ok({"relief", "calm", "focused"} <= set(emo.HAND_PICKED) and not set(emo.RM1977) & set(emo.HAND_PICKED),
+ok({"joy", "anger", "sadness", "surprise", "annoyance"} <= set(emo.RM1977) and "disgust" not in pts and "fear" not in pts,
+   "the R&M emotions, with annoyance in place of disgust (Nov 21) and no fear (Nov 22)")
+ok({"relief", "calm", "focused", "distressed"} <= set(emo.HAND_PICKED) and not set(emo.RM1977) & set(emo.HAND_PICKED),
    "custom points kept apart from the sourced ones")
 ok(len(pts) == len(emo.RM1977) + len(emo.HAND_PICKED), "no name defined twice")
 ok(pts["anger"] == (-0.51, 0.59, 0.25), "anger is R&M's angry, exactly (the Step 1 test sets her there)")
@@ -137,10 +137,10 @@ ok(L(*drop(0.25))["name"] == "anger" and L(*drop(0.3))["name"] == "annoyance",
    "anger with arousal down 0.25 is still anger; down 0.3 it reads annoyance")
 # surprise is pleasant in R&M, so an unpleasant surprise has no point of its own.
 bad_surprise = (-pts["surprise"][0], pts["surprise"][1], pts["surprise"][2])
-ok(L(*bad_surprise)["name"] == "fear" and L(*bad_surprise, by="distance")["name"] == "fear",
-   "surprise with valence flipped negative reads fear")
-# Directions far from every point still get the nearest name: pure low control reads fear at 64 degrees.
-ok(L(0, 0, -0.5)["name"] == "fear", "pure low dominance reads fear (nothing closer)")
+ok(L(*bad_surprise)["name"] == "distressed" and L(*bad_surprise, by="distance")["name"] == "distressed",
+   "surprise with valence flipped negative reads distressed (was fear)")
+# Directions far from every point still get the nearest name: pure low control reads distressed at 64 degrees.
+ok(L(0, 0, -0.5)["name"] == "worried", "pure low dominance reads worried (4.5's point is closest; was fear)")
 
 print("6c. annoyance replaces disgust (Jordan, Nov 21)")
 ann = pts["annoyance"]

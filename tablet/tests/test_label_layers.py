@@ -122,7 +122,7 @@ ok("neutral" in s2j[1:-1], "sadness onto joy passes briefly through neutral")
 
 print("5. shadow mode holds through a fade")
 leaked = []
-for e, m in ((P["anger"], sc("contentment", 0.5)), (P["joy"], Z), (P["fear"], sc("sadness", 0.5))):
+for e, m in ((P["anger"], sc("contentment", 0.5)), (P["joy"], Z), (P["distressed"], sc("sadness", 0.5))):
     t0 = setup(e, m, Z)
     for mins in TIMES:
         after(t0, mins)

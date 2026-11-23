@@ -36,4 +36,5 @@ def get_tablet_battery() -> dict:
 
 
 def install_on(mcp):
-    mcp.tool()(get_tablet_battery)
+    import rivia_tools  # the call log (Step 4.1); imported here so read_battery() stays dependency-free
+    mcp.tool()(rivia_tools.log_fixed(get_tablet_battery, door="app"))
