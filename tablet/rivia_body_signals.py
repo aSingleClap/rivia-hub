@@ -52,6 +52,9 @@ PROC = "/proc"
 PUBLIC_HEALTH = "https://mcp.rivia.observer/health"
 LOCAL_HEALTH = "http://127.0.0.1:8787/health"
 CLOUDFLARED_PORTS = range(20241, 20246)  # cloudflared's default metrics ports when --metrics isn't set
+# cloudflared's metrics page is about 22 KB on the tablet, and cloudflared_tunnel_ha_connections sits past
+# byte 5000. The health checks' 4 KB read cut it off, so edge_connections always read None.
+METRICS_MAX_BYTES = 1 << 20
 
 # Tool-call error codes that mean her body failed, not that the request was bad. Codes like bad_value, bad_day,
 # place_exists or need_estimate are Jordan (or Gemini) asking for something invalid, and she answered correctly
@@ -105,17 +108,42 @@ def _num(text, scale=1.0):
 
 # ---------- the server process ----------
 
-def uptime_s(rivia_dir=None, proc=PROC):
-    """Seconds since rivia_server.py started, from its pid file and /proc. None if it isn't running."""
+def _boottime_clock():
+    """Seconds since boot from the kernel's boot clock (counts suspend, like /proc/uptime and a process's
+    starttime). None where Python has no CLOCK_BOOTTIME."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    return time.clock_gettime(clock) if clock is not None else None
+
+
+def _since_boot(proc=PROC, boot_clock=None):
+    """Seconds since boot: /proc/uptime, else the boot clock. Android refuses apps /proc/uptime ("Permission
+    denied" for Termux on the tablet), which left uptime_s None while the server ran. None if neither works."""
+    boot = _read(os.path.join(proc, "uptime"))
+    if boot:
+        try:
+            return float(boot.split()[0])
+        except (IndexError, ValueError):
+            pass
+    try:
+        v = (boot_clock or _boottime_clock)()
+        return float(v) if v is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def uptime_s(rivia_dir=None, proc=PROC, boot_clock=None):
+    """Seconds since rivia_server.py started, from its pid file and /proc. None if it isn't running.
+    boot_clock (tests) stands in for the kernel's boot clock when /proc/uptime can't be read."""
     pid = _read(os.path.join(rivia_dir or RIVIA_DIR, "server.pid"))
     stat = _read(os.path.join(proc, str(pid), "stat")) if pid and pid.isdigit() else None
-    boot = _read(os.path.join(proc, "uptime"))
-    if not stat or not boot:
+    if not stat:
         return None
     try:
         start_ticks = int(stat.rsplit(")", 1)[1].split()[19])  # field 22 (starttime), after "pid (comm)"
-        since_boot = float(boot.split()[0])
     except (IndexError, ValueError):
+        return None
+    since_boot = _since_boot(proc, boot_clock)
+    if since_boot is None:
         return None
     hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
     return round(max(0.0, since_boot - start_ticks / hz), 1)
@@ -244,11 +272,11 @@ def failed_connections(calls_failed, lines, elapsed_s):
 
 # ---------- the Cloudflare tunnel (replaces the spec's Tailscale check) ----------
 
-def _get(url, timeout):
+def _get(url, timeout, max_bytes=4096):
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
-            body = r.read(4096)
+            body = r.read(max_bytes)
             return r.status, int((time.perf_counter() - t0) * 1000), body
     except urllib.error.HTTPError as e:
         return e.code, int((time.perf_counter() - t0) * 1000), b""
@@ -268,7 +296,7 @@ def _edge_connections(timeout, metrics_url=None, get=None):
     """cloudflared_tunnel_ha_connections from cloudflared's metrics server (normally 4). Tries metrics_url,
     else the default ports 20241-20245 on 127.0.0.1. None if none answers."""
     urls = [metrics_url] if metrics_url else ["http://127.0.0.1:%d/metrics" % p for p in CLOUDFLARED_PORTS]
-    get = get or _get
+    get = get or (lambda url, t: _get(url, t, max_bytes=METRICS_MAX_BYTES))
     for url in urls:
         status, _, body = get(url, timeout)
         if status != 200:
@@ -291,10 +319,10 @@ def tunnel(timeout=5, rivia_dir=None, proc=PROC, public_url=PUBLIC_HEALTH, local
     server's problem, counted in restarts and errors, not the tunnel's). 4.3 averages it into a percent.
     Note: a check from the tablet goes out to Cloudflare and back. It proves the tunnel works, not that
     Jordan's phone can reach it from wherever he is."""
-    get = get or _get
-    lstatus, lms, _ = get(local_url, timeout)
-    pstatus, pms, _ = get(public_url, timeout)
-    edge = _edge_connections(min(timeout, 2), metrics_url, get)
+    fetch = get or _get
+    lstatus, lms, _ = fetch(local_url, timeout)
+    pstatus, pms, _ = fetch(public_url, timeout)
+    edge = _edge_connections(min(timeout, 2), metrics_url, get)  # None: its own reader, which reads the whole page
     local_ok, public_ok = lstatus == 200, pstatus == 200
     if public_ok:
         unreachable = 0.0
