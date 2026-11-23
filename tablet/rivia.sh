@@ -37,6 +37,7 @@
 #   rivia logs      last lines of the server and tunnel logs
 #   rivia body      her body signals: the last 5 readings (show), or take one now (once)
 #   rivia body dials  the shadow dials (stress, confidence, caution, the pull she'd feel): last 5 rows
+#   rivia body plan   Step 5 in shadow: how well her plans matched your days, last 7 scored days
 #   rivia revoke    kill switch: revoke every app and admin token (sign in again in the app after)
 #   rivia restart   stop + start (do this after editing any .py file)
 #   rivia setup     make new secrets in ~/.rivia/.env (only if you have none)
@@ -340,7 +341,7 @@ case "${1:-}" in
              here="$(cd "$(dirname "$0")" && pwd)"
              if [ -f "$here/test_rivia_auth.py" ]; then testdir="$here"; else testdir="$CODE"; fi
              cd "$testdir" || exit 1
-             for t in test_rivia_auth.py test_public_e2e.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py test_hub_mcp.py test_write_day.py test_app_login.py test_core_split.py test_emotion.py test_changelog.py test_acceptance.py test_inject.py test_emotion_app.py test_layers.py test_decay.py test_dial.py test_fade_log.py test_drift_limits.py tests/test_label_layers.py tests/test_no_fear.py test_step2_acceptance.py test_drift.py test_drift_weekly.py test_fixed_logging.py test_body_signals.py test_body_collect.py test_normal.py test_stress.py test_confidence.py test_body_cap.py test_caution.py test_health.py test_body_shadow.py; do
+             for t in test_rivia_auth.py test_public_e2e.py test_sched.py test_gcal.py test_signin_check.py test_settings.py test_restore.py test_drive_backup.py test_places.py test_arrival.py test_admin_door.py test_approval.py test_hub.py test_hub_mcp.py test_write_day.py test_app_login.py test_core_split.py test_emotion.py test_changelog.py test_acceptance.py test_inject.py test_emotion_app.py test_layers.py test_decay.py test_dial.py test_fade_log.py test_drift_limits.py tests/test_label_layers.py tests/test_no_fear.py test_step2_acceptance.py test_drift.py test_drift_weekly.py test_fixed_logging.py test_body_signals.py test_body_collect.py test_normal.py test_stress.py test_confidence.py test_body_cap.py test_caution.py test_health.py test_body_shadow.py test_plan_score.py test_gap.py test_trend.py test_trend_mood.py test_goal_limits.py test_usage.py test_progress.py test_progress_settings.py; do
                  if python "$t" > "$LOGS/test.log" 2>&1; then echo "$t: PASS"
                  else echo "$t: FAILED"; tail -n 15 "$LOGS/test.log"; exit 1; fi
              done ;;
@@ -361,7 +362,9 @@ case "${1:-}" in
     sched)   sched "${@:2}" ;;
     drift)   load_venv; cd "$CODE" && python rivia_drift_weekly.py "${@:2}" ;;
     body)    load_venv; cd "$CODE"
-             if [ "${2:-}" = "dials" ]; then python rivia_body_shadow.py; else python rivia_body_collect.py "${@:2}"; fi ;;
+             if [ "${2:-}" = "dials" ]; then python rivia_body_shadow.py
+             elif [ "${2:-}" = "plan" ]; then python rivia_progress.py
+             else python rivia_body_collect.py "${@:2}"; fi ;;
     install-cli) install_cli ;;
-    *)       sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)       sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
