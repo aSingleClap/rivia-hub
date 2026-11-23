@@ -173,7 +173,25 @@ def set_setting(key: str, value: str | int | float | dict, scope: str = "standin
         return fail("internal", repr(e), "settings")
 
 
+PLANNED_RESTART_LINE = "planned restart (restart_server from the hub)"
+
+
+def note_planned_restart():
+    """Write one line to watch.log before a restart from the hub (emotion spec Step 4.1, Jordan: "Yes").
+    The watchdog then logs "server or tunnel down; restarting" like a crash; this line comes first, so the
+    body-signal reader can leave that restart out. Same format as the watchdog's own lines. Never raises."""
+    try:
+        logs = os.path.join(store.rivia_dir(), "logs")
+        os.makedirs(logs, exist_ok=True)
+        with open(os.path.join(logs, "watch.log"), "a") as f:
+            f.write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), PLANNED_RESTART_LINE))
+    except OSError:
+        pass
+
+
 def _default_restart():
+    note_planned_restart()
+
     def _go():
         os.kill(os.getpid(), signal.SIGTERM)
     threading.Timer(0.4, _go).start()
@@ -240,11 +258,13 @@ def undo_change(change_id: str | None = None) -> dict:
         return fail("internal", repr(e), "settings")
 
 
-def install_read_only_on(mcp):
-    """hub_status, list_tools and list_calls on another door (the app door), read only."""
-    mcp.tool()(hub_status)
-    mcp.tool()(list_tools)
-    mcp.tool()(list_calls)
+def install_read_only_on(mcp, door="app"):
+    """hub_status, list_tools and list_calls on another door (the app door), read only. Each call goes in
+    the call log (emotion spec Step 4.1), so her response time and failures include them. The admin door's
+    copies are the Server Hub's, not hers, and stay unlogged."""
+    mcp.tool()(tools.log_fixed(hub_status, door))
+    mcp.tool()(tools.log_fixed(list_tools, door))
+    mcp.tool()(tools.log_fixed(list_calls, door))
 
 
 def install_on(mcp):

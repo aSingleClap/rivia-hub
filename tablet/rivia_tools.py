@@ -3,6 +3,7 @@
 # scheduling) registers its actions and seed rows here when it loads; core never imports them,
 # so a part that fails to load only loses its own tools. Action ids such as "sched.arrival" are
 # kept from before the core split because the stored rows name them.
+import functools
 import json
 import time
 from datetime import datetime
@@ -173,6 +174,36 @@ def log_call(door, tool, action, ok, code, ms):
         )
     finally:
         con.close()
+
+
+def log_fixed(fn, door, name=None):
+    """Wrap a fixed tool (not a row) so its calls go in the call log like row tools: ok, error code and ms.
+    Emotion spec Step 4.1 (Jordan, Nov 22: "They can be logged especially for response time and failures").
+    The action is "fixed.<name>". A reply with ok=false logs its error code; an error that isn't a
+    {"code": ...} dict logs "unreadable"; an exception logs "internal" and is raised as before. Logging
+    never changes the reply and never raises."""
+    name = name or fn.__name__
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        t0 = time.perf_counter()
+        ok, code = False, "internal"
+        try:
+            result = fn(*args, **kwargs)
+            if isinstance(result, dict) and "ok" in result:
+                ok = bool(result.get("ok"))
+                err = result.get("error")
+                code = None if ok else ((err.get("code") if isinstance(err, dict) else None) or "unreadable")
+            else:
+                ok, code = True, None
+            return result
+        finally:
+            try:
+                log_call(door, name, "fixed." + name, ok, code, int((time.perf_counter() - t0) * 1000))
+            except Exception:  # noqa: BLE001
+                pass
+
+    return run
 
 
 def _transforms(action, preset):

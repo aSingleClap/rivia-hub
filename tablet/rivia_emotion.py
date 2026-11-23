@@ -151,13 +151,13 @@ LIMITS = ("anchor", "day", "week")  # names used in change_log.limited
 # Emotions with Representation Learning", arXiv:2104.10117 (original table not read directly).
 # Their axis is pleasure; here it is v. Each name maps to the R&M term in brackets.
 # Cross-checked (Nov 21) against two other reprints: Gebhard (2005) "ALMA - A Layered Model of Affect",
-# Table 2, and arXiv:2106.15846, Table 1. Anger, disgusted, surprise, afraid and terrified match exactly;
+# Table 2, and arXiv:2106.15846, Table 1. Anger, disgusted, surprise, afraid and terrified match exactly
+# (afraid's numbers now sit under "distressed" in HAND_PICKED, see below);
 # sad is -0.63 in 2106.15846 vs -0.64 here (unresolved, immaterial). Joyful, content and annoyed
 # were read only in Guo & Choi. No source states R&M's scale; all three use the values directly as -1..+1.
 RM1977 = {
     "joy": (0.76, 0.48, 0.35),           # [joyful]
     "anger": (-0.51, 0.59, 0.25),        # [angry]
-    "fear": (-0.64, 0.60, -0.43),        # [afraid]; [terrified] -0.62, 0.82, -0.43 is the extreme form
     "sadness": (-0.64, -0.27, -0.33),    # [sad]
     "surprise": (0.40, 0.67, -0.13),     # [surprised]; note R&M put surprise on the pleasant side
     "annoyance": (-0.28, 0.17, 0.04),    # [annoyed]; replaced [disgusted] -0.60, 0.35, 0.11 at Jordan's ask (Nov 21)
@@ -165,15 +165,28 @@ RM1977 = {
 }
 # Hand-picked, not from any table; starting guesses to tune by feel, like the spec's other numbers.
 HAND_PICKED = {
+    # No fear (Jordan, Nov 22: "None of them should be scared or show fear ... but she can feel distressed
+    # and/or annoyed"). "distressed" takes fear's place at R&M's [afraid] numbers, unchanged, so every state that
+    # read fear now reads distressed and nothing else moves. Not an R&M term, so it lives here, not in RM1977.
+    # Why the same spot: in the NRC VAD Lexicon (Mohammad 2018, 0..1 scale) distressed and afraid have almost
+    # the same arousal (0.771 vs 0.775) and both sit low on control (0.324 vs 0.245); distressed is a little
+    # less unpleasant (0.143 vs 0.010). Close neighbours, so the direction barely changes.
+    "distressed": (-0.64, 0.60, -0.43),
     "relief": (0.60, -0.20, 0.05),   # pleasant, arousal dropping after a threat passes, control neutral
     "calm": (0.40, -0.60, 0.20),     # mildly pleasant, low arousal, slightly in control
     "focused": (0.10, 0.40, 0.40),   # near-neutral feeling, engaged, in control: "steady and bad, working on it"
+    # Step 4.5 (Jordan, Nov 22: "Yes add worried"): unpleasant, a little on edge, and not in control. Between
+    # annoyance (she knows what's wrong) and fear (strong, kept for real events). Placed so annoyed plus a big
+    # confidence drop reads worried, never fear, and over 0.3 from every other point (test_emotion's rule).
+    "worried": (-0.49, 0.21, -0.28),
 }
 REFERENCE_POINTS = {**RM1977, **HAND_PICKED}
+# No fear (Jordan, Nov 22): words no label name may be or contain. Checked by tests/test_no_fear.py.
+NEVER_LABELS = ("fear", "afraid", "scared", "terrified", "frightened", "panic")
 
 # 1.4: label tuning, as distance from 0, 0, 0 (the cube's corners are sqrt(3) = 1.73 out). Starting guesses.
 # The reference points sit 0.33 (annoyance) to 1.08 (contentment) out, so every point at its own
-# coordinates reads at least mild; joy, fear and contentment read strong, anger moderate.
+# coordinates reads at least mild; joy, distressed and contentment read strong, anger moderate.
 NEUTRAL_BELOW = 0.15  # under this she is "neutral": half a capped turn's nudge (0.3), and noise after decay
 INTENSITY_BANDS = (   # (from this distance up, word); ascending
     (NEUTRAL_BELOW, "faint"),

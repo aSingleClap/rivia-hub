@@ -67,6 +67,11 @@ def build_doors():
     rivia_battery.install_on(app_mcp)
     rivia_admin.install_read_only_on(app_mcp)
     tools.install_on(app_mcp, door="app")
+    # Step 4.8 (Jordan, Nov 22: "Let's keep it internal I still want to be able to check on the status of things if
+    # I ask her"): one read-only lookup of the collector's last saved reading. No arguments, no network call.
+    # Gemini sees it only once the app lets it through.
+    import rivia_health_tool
+    rivia_health_tool.install_on(app_mcp, log_fixed=tools.log_fixed)
     rivia_admin.install_on(admin_mcp)
     return sched
 
@@ -91,6 +96,9 @@ def public_app():
                 import rivia_gcal as gcal
                 if gcal.signin_check_enabled():
                     task = asyncio.create_task(gcal.signin_check_loop(), name="rivia-signin-check")
+            # Her body signals (emotion spec Step 4.2): a task of its own, started after the sign-in check and
+            # never inside it, so a broken collector can't stop or delay the sign-in check.
+            body_task = start_body_collector()
             try:
                 yield
             finally:
@@ -98,9 +106,40 @@ def public_app():
                     task.cancel()
                     with suppress(asyncio.CancelledError):
                         await task
+                if body_task is not None:
+                    body_task.cancel()
+                    # A collector that already died must not break shutdown (its error was printed when it died).
+                    with suppress(asyncio.CancelledError, Exception):
+                        await body_task
 
     return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
                                 extra_routes=emotion_routes())
+
+
+def start_body_collector():
+    """The body-signal collector (rivia_body_collect, emotion spec Step 4.2) as its own background task, or None
+    when RIVIA_BODY_COLLECTOR=0 or it fails to load. It reads her health and writes only body.db. It never imports
+    the Google or sign-in code (its test checks), and if it fails to load the server and the sign-in check carry on
+    without it. Jordan, Nov 22: "As long as the connector doesn't sign me out then that's fine"."""
+    try:
+        import rivia_body_collect
+        if not rivia_body_collect.enabled():
+            return None
+        t = asyncio.create_task(rivia_body_collect.loop(), name="rivia-body-collector")
+        t.add_done_callback(_body_collector_ended)
+        return t
+    except Exception as e:  # noqa: BLE001
+        print("rivia: body collector did not start (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return None
+
+
+def _body_collector_ended(t):
+    """If the collector's loop ever ends on an error, say so once in server.log. It isn't restarted until the next
+    server start; the sign-in check and the doors are not affected."""
+    if not t.cancelled() and t.exception() is not None:
+        print("rivia: body collector stopped (%s); everything else keeps running." % type(t.exception()).__name__,
+              file=sys.stderr)
 
 
 def emotion_routes():
@@ -109,12 +148,42 @@ def emotion_routes():
     keeps serving without it."""
     try:
         import rivia_emotion_app
-        return rivia_emotion_app.routes()
+        return [_logged_route(r) for r in rivia_emotion_app.routes()]
     except Exception as e:  # noqa: BLE001
         print("rivia: emotion button did not load (%s); everything else keeps running." % type(e).__name__,
               file=sys.stderr)
         return []
 
+
+
+def _logged_route(route):
+    """The emotion button's route, with each press timed in the call log (emotion spec Step 4.1, Jordan Nov 22:
+    "They can be logged especially for response time and failures"): tool "app_emotion", door "app",
+    action "route.emotion". Wrapped here in core, so rivia_emotion_app still imports no tool code (its Step 1
+    guard). A 5xx logs "internal" (her failure); a 4xx logs "http_<status>" (a refused press: locked or bad
+    input), which the body signals don't count as hers. The call log is not the tool table: nothing is added to
+    rivia_tools.ACTIONS or tools/list. Logging never changes the reply."""
+    import time
+    from starlette.routing import Route
+    inner = route.endpoint
+
+    async def endpoint(request):
+        t0 = time.perf_counter()
+        resp = None
+        try:
+            resp = await inner(request)
+            return resp
+        finally:
+            try:
+                status = getattr(resp, "status_code", 500)
+                ok = status < 400
+                code = None if ok else ("internal" if status >= 500 else "http_%d" % status)
+                tools.log_call("app", "app_emotion", "route.emotion", ok, code,
+                               int((time.perf_counter() - t0) * 1000))
+            except Exception:  # noqa: BLE001
+                pass
+
+    return Route(route.path, endpoint, methods=sorted(route.methods or ()), name=route.name)
 
 if __name__ == "__main__":
     import uvicorn

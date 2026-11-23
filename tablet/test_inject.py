@@ -58,7 +58,7 @@ for name in pts:
         assert fmt.match(b["line"]), b["line"]
         seen += 1
 ok(seen >= 40, "word, adverb and intensity N agree with label() for every point at 5 strengths (%d lines)" % seen)
-ok(not re.search(r"\d\.\d|-\d", inj.build_line(*pts["fear"])["line"]), "no raw V, A, D numbers in the line")
+ok(not re.search(r"\d\.\d|-\d", inj.build_line(*pts["distressed"])["line"]), "no raw V, A, D numbers in the line")
 ok(inj.build_line(*pts["sadness"])["style"] == "plain", "unlisted emotions get the plain style")
 ok(inj.build_line(1.5, 0, 0) == inj.build_line(1, 0, 0), "out-of-range input is clamped like label()")
 
