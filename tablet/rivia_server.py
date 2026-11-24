@@ -113,7 +113,7 @@ def public_app():
                         await body_task
 
     return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
-                                extra_routes=emotion_routes() + progress_routes() + trust_routes())
+                                extra_routes=emotion_routes() + progress_routes() + trust_routes() + reading_routes())
 
 
 def start_body_collector():
@@ -178,6 +178,20 @@ def trust_routes():
         return [_logged_route(r, "app_trust", "route.trust") for r in rivia_trust_app.routes()]
     except Exception as e:  # noqa: BLE001
         print("rivia: layer 6 card did not load (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return []
+
+
+def reading_routes():
+    """The app's layer 7 card (/app/reading, emotion spec Step 7.11, DRAFT Nov 24): how she reads you against your own
+    normal, pattern guesses you confirm or reject, and the questions she would have asked (shadow). Plain routes
+    behind the app token, never MCP tools, so Gemini can't see or call them. If they fail to load, the server keeps
+    serving without them."""
+    try:
+        import rivia_reading_app
+        return [_logged_route(r, "app_reading", "route.reading") for r in rivia_reading_app.routes()]
+    except Exception as e:  # noqa: BLE001
+        print("rivia: layer 7 card did not load (%s); everything else keeps running." % type(e).__name__,
               file=sys.stderr)
         return []
 

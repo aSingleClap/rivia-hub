@@ -210,7 +210,7 @@ for m in sorted(STEP6):
     ok("tool" not in calls and not {x for x in mods if x.startswith(("fastmcp", "mcp", "rivia_tools"))},
        "%s registers no tool and doesn't touch the tool table" % m)
 src = open(os.path.join(HERE, "rivia_server.py")).read()
-ok("+ trust_routes())" in src and "rivia_trust_app.routes()" in src, "rivia_server hands it over as routes")
+ok("+ trust_routes()" in src and "rivia_trust_app.routes()" in src, "rivia_server hands it over as routes")
 
 server.should_exit = True
 print("\n%d checks passed" % COUNT["n"])

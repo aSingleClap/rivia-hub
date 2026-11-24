@@ -14,6 +14,10 @@
 #                              Tablet code (rivia_satisfaction.read_words), not Rivia, decides praise, correction or
 #                              neither. Your text is read and dropped; only what was heard is kept. Her reply's words
 #                              only pick the area for a correction.
+#                              Step 7 (DRAFT, Nov 24): also optional "sent_at" and "reply_at" (when you sent it and
+#                              when her reply before it arrived, milliseconds since 1970). After Step 6's reading, the
+#                              same copy goes to rivia_reading (numbers only, text dropped) and the Flash read runs
+#                              in the background. A Step 7 problem never changes this route's answer.
 #   POST /app/trust/unlock     {"unlock": "speak_up", "on": true | false, "note": "..."}  you, by hand, only
 #   POST /app/trust/kill       {"kill": true | false, "note": "..."}  the off switch
 #
@@ -28,6 +32,7 @@ import json
 import time
 from datetime import datetime
 
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -140,9 +145,9 @@ def handle_feedback(body, con=None, now=None):
 
 def handle_words(body, con=None, now=None):
     now = time.time() if now is None else now
-    if not isinstance(body, dict) or set(body) - {"message_id", "text", "reply_text", "day"}:
+    if not isinstance(body, dict) or set(body) - {"message_id", "text", "reply_text", "day", "sent_at", "reply_at"}:
         return 400, {"ok": False, "code": "bad_request",
-                     "error": "send message_id and text, and optionally reply_text and day"}
+                     "error": "send message_id and text, and optionally reply_text, day, sent_at and reply_at"}
     mid, text, reply = body.get("message_id"), body.get("text"), body.get("reply_text")
     if not isinstance(mid, str) or not mid or len(mid) > 80:
         return 400, {"ok": False, "code": "bad_request", "error": "message_id is needed, so one message counts once"}
@@ -168,6 +173,28 @@ def handle_words(body, con=None, now=None):
         if own:
             con.close()
     return 200, {"ok": True, "counted": row is not None, "heard": heard, "saved": row}
+
+
+def reading_after(body, status):
+    """Step 7: once Step 6 has answered the phone, read the same copy for Step 7 (it may read the calendar), then the
+    Flash read, all in the background so the phone never waits. Errors stay there: Step 6's answer is already sent."""
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return lambda: reading_run(body)
+
+
+def reading_run(body):
+    try:
+        import rivia_reading as reading
+        import rivia_reading_flash as flash
+        row = reading.take(body)
+        if row is not None and row["flash_status"] == "waiting":
+            flash.read(row["message_id"], body["text"])
+    except Exception as e:  # noqa: BLE001
+        import sys
+        print("rivia: Step 7 reading skipped a message (%s)" % type(e).__name__, file=sys.stderr)
+    finally:
+        body.clear()   # your text is dropped once read
 
 
 def handle_unlock(body, con=None, now=None):
@@ -209,7 +236,7 @@ async def _body(request):
         return None, _err(400, "bad_json", "body must be JSON")
 
 
-def _post_only(fn):
+def _post_only(fn, after=None):
     async def endpoint(request: Request):
         if request.method != "POST":
             return _err(405, "method_not_allowed", "use POST")
@@ -218,7 +245,9 @@ def _post_only(fn):
             if bad is not None:
                 return bad
             status, reply = fn(body)
-            return JSONResponse(reply, status_code=status)
+            later = after(body, status) if after else None
+            return JSONResponse(reply, status_code=status,
+                                background=BackgroundTask(later) if later else None)
         except Exception as e:  # noqa: BLE001  (a broken file must not take the server down)
             return _err(500, "internal", type(e).__name__)
     return endpoint
@@ -244,6 +273,6 @@ def routes():
     for the rest) so none falls through to the /app MCP mount."""
     return [Route(PATH, card, methods=ALL_METHODS),
             Route(FEEDBACK_PATH, _post_only(handle_feedback), methods=ALL_METHODS),
-            Route(WORDS_PATH, _post_only(handle_words), methods=ALL_METHODS),
+            Route(WORDS_PATH, _post_only(handle_words, after=reading_after), methods=ALL_METHODS),
             Route(UNLOCK_PATH, _post_only(handle_unlock), methods=ALL_METHODS),
             Route(KILL_PATH, _post_only(handle_kill), methods=ALL_METHODS)]
