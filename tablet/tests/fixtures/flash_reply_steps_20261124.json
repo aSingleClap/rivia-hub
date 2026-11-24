@@ -1,0 +1,38 @@
+{
+  "status": "completed",
+  "usage": {
+    "total_tokens": 549,
+    "total_input_tokens": 333,
+    "input_tokens_by_modality": [
+      {
+        "modality": "text",
+        "tokens": 333
+      }
+    ],
+    "total_cached_tokens": 0,
+    "total_output_tokens": 31,
+    "total_tool_use_tokens": 0,
+    "total_thought_tokens": 185,
+    "initial_input_tokens": 333
+  },
+  "created": "2026-11-24T20:55:45Z",
+  "updated": "2026-11-24T20:55:45Z",
+  "service_tier": "standard",
+  "steps": [
+    {
+      "signature": "EqMGCqAGAWkUfRPN3REFssW/HZ/Joe3jur3wx/gvfMI4xhHju4H7+DvGiuVWU7QJyj1IjrODWrB/vL/dSxOmnjG8Zkf0hlO0hwaeo5qPU02i/FuZ0pMsXaWAnxMsL98J0OB59oC9iW7/RnXYNXJAEOFoT1iebW0K7Q5Kh+BAHMRP5dZFwD3bAI9icMT6CIzsl0UCgPtxVOHEudeA6TKzUXB3zO8rr9QUBUQH1tdL1AKZSiUyo95AHGjIBiXS8cHZEP57Jwc1faBdtX6RqUYDy2Eb9pVwNk+wRhpa3I0Dept1mtiKMvngJ5+4uzufR6PT1VJSZImnbCE1czluXf7NqZPuRkAojzrq/VEsFmL82YoOIOcoa5qE0aCYELcnhiiWKJSgzjpR9Mb4pbUVEWfy3azB4mtICC4IDmo6Rk0/QZUKefrQuy/9Nk03tBEMGnFnfGCR4LT7aIK2xxexcxllw1PfJK8FtN4UxM8L/nsGMaZ6zUBXO/LV9Eu6+HrV20B4Y0oUWLKn5zIwa9sy3V9XR8wdOJ2yPdZ6iDh+7F8TXjTKkIiCAHkxm+o0dNdAjJt6w7kV2sBdty2EkYiIMZQ2PG3CKvMjh8HYxLDtIS3CNOOY/AEGUyxn5StrP02rJd2hHEnY0WkrHFROADl/5ps1nE1WZv7FOCMsSyv+V7fgsUZKZ32rYApyogasXztj3PePBDF/u9+vJ7ow/WFJfeDOh6ngBkduB5cpF6F7gY4LhPjKwt6gm290Oq0uCpG159I29gwCzmkhZI4RncAthNoW487r8LhT5IxmhxlKYrOS+J78Q7u8/hVn9WBGFAwdPcFpRXEIOBhfH/tOWMe8jryU5xqdpJ/tWWSN+PL6++QWkbV4AQMYKl0bPxZVhS8LVFbRFfnTyVG7x98Py3y8ST6exSji9lKf1mpi9aAK4njkojZ8h+XoghuYXgZh5l+L1cfo5DPBMlpgqs8Oxa9f6Y5HZ8+cG8En1bWkVV09+6zd1SkDQvn7aZfQssojuJoiy3oRdI/ZjlwAiU0ykctAIiQJQqSV8DIjwn+b+h5aV39FB9q1zRJc3tk=",
+      "type": "thought"
+    },
+    {
+      "content": [
+        {
+          "text": "{\"valence\":0,\"arousal\":0,\"dominance\":1,\"other_reading\":false,\"events\":[{\"event\":\"personal\",\"strength\":1}]}",
+          "type": "text"
+        }
+      ],
+      "type": "model_output"
+    }
+  ],
+  "object": "interaction",
+  "model": "gemini-3.8-flash"
+}
