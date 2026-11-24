@@ -193,6 +193,12 @@ def reading_run(body):
     except Exception as e:  # noqa: BLE001
         import sys
         print("rivia: Step 7 reading skipped a message (%s)" % type(e).__name__, file=sys.stderr)
+    try:
+        import rivia_style as style   # Step 8 (DRAFT Nov 24): her would-be style, after Step 7 has read the message
+        style.take(body.get("message_id"), body.get("text"))
+    except Exception as e:  # noqa: BLE001  (Step 8 failing never stops Steps 6 and 7)
+        import sys
+        print("rivia: Step 8 style skipped a message (%s)" % type(e).__name__, file=sys.stderr)
     finally:
         body.clear()   # your text is dropped once read
 
