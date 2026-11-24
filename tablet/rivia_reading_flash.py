@@ -16,6 +16,10 @@
 #     folder). No key = no Flash read, said plainly as "no_key". This file never stores, makes or prints a key. The key
 #     goes on the tablet at install, on Jordan's yes.
 #
+# Step 3.4 (DRAFT Nov 24, Jordan: "Split"): the same call also lists which events the message is (thanked her,
+# corrected her, frustrated at something, cursed at her, personal, good news, bad news) with a strength 1 to 3. Only
+# the names and strengths go to rivia_appraisal, which moves a would-be copy of her mood (shadow). No extra call.
+#
 # Never an MCP tool. Never emotion.db. Rivia never sees these scores in shadow.
 import os
 import sys
@@ -37,8 +41,14 @@ RATER = (
     "dominance: -3 very unsure or overwhelmed to 3 very confident and in control. 0 balanced.\n"
     "other_reading: true only if a careful listener could reasonably read this message's feeling a clearly "
     "different way; otherwise false.\n"
-    "Answer with JSON only."
 )
+RATER_PLAIN = RATER + "Answer with JSON only."   # Step 7's prompt without Step 3's event menu (Layer 3 switched off)
+try:  # Step 3.4: the event menu rides in the same call. If Step 3's file is missing, Step 7 reads as before.
+    import rivia_appraisal as _appraisal
+    RATER += _appraisal.FLASH_EVENTS
+except Exception:  # noqa: BLE001
+    _appraisal = None
+RATER += "Answer with JSON only."
 SCHEMA = {
     "type": "object",
     "properties": {**{ax: {"type": "integer", "minimum": -3, "maximum": 3}
@@ -46,6 +56,20 @@ SCHEMA = {
                    "other_reading": {"type": "boolean"}},
     "required": ["valence", "arousal", "dominance", "other_reading"],
 }
+SCHEMA_PLAIN = {**SCHEMA, "properties": dict(SCHEMA["properties"])}
+if _appraisal is not None:  # not required: an answer without events still gives Step 7 its scores
+    SCHEMA["properties"]["events"] = _appraisal.FLASH_EVENTS_SCHEMA
+
+
+def events_on():
+    """Step 3's event menu rides in this call only while Layer 3 (l3) is switched on. Never raises."""
+    if _appraisal is None:
+        return False
+    try:
+        import rivia_toggles as toggles
+        return toggles.runs("l3")
+    except Exception:  # noqa: BLE001
+        return True
 
 STATUSES = ("ok", "no_key", "at_limit", "off", "failed", "unusable", "gone")
 
@@ -56,11 +80,14 @@ def key():
     return k or None
 
 
-def body(text, model=MODEL):
-    return {"model": model, "system_instruction": RATER,
+def body(text, model=MODEL, events=None):
+    """The Flash request. events (default: Layer 3's switch) decides whether Step 3's event menu rides along."""
+    events = events_on() if events is None else events
+    return {"model": model, "system_instruction": RATER if events else RATER_PLAIN,
             "input": [{"type": "user_input", "content": "Message to rate:\n<<<\n" + text[:TEXT_MAX] + "\n>>>"}],
             "store": False,
-            "response_format": {"type": "text", "mime_type": "application/json", "schema": SCHEMA},
+            "response_format": {"type": "text", "mime_type": "application/json",
+                                "schema": SCHEMA if events else SCHEMA_PLAIN},
             "generation_config": {}}   # model default thinking, as the baseline rater
 
 
@@ -106,6 +133,7 @@ def read(message_id, text, con=None, now=None, tune=None):
         t = reading._tune(tune)
         if reading.message(con, message_id) is None:
             return "gone"
+        raw = None
         if not t.get("flash_on", 1):
             status, vad, other = "off", None, None
         elif key() is None:
@@ -118,12 +146,16 @@ def read(message_id, text, con=None, now=None, tune=None):
                 tin, tout = _tokens(res)
                 import rivia_usage as usage
                 usage.record_call(con, MODEL, time.time(), input_tokens=tin, output_tokens=tout)
-                vad, other = parse(baseline.output_text(res))
+                raw = baseline.output_text(res)
+                vad, other = parse(raw)
                 status = "ok" if vad else "unusable"
             except Exception as e:  # noqa: BLE001  (network down, Google error: word list only for this one)
                 print("rivia: Flash read failed (%s)" % type(e).__name__, file=sys.stderr)
                 status, vad, other = "failed", None, None
         reading.store_flash(con, message_id, vad, status, other, now=now, tune=t)
+        if _appraisal is not None and events_on():   # Step 3.4: never raises; Layer 3 off: no message events
+            _appraisal.from_flash(con, message_id, status, raw, now=now)
+        raw = None  # noqa: F841  (dropped)
         return status
     except Exception as e:  # noqa: BLE001  (never take the words copy down)
         print("rivia: reading's Flash step failed (%s)" % type(e).__name__, file=sys.stderr)

@@ -114,6 +114,7 @@ def public_app():
 
     return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
                                 extra_routes=emotion_routes() + progress_routes() + trust_routes() + style_routes()
+                                + appraisal_routes()
                                 + toggles_routes() + reading_routes())
 
 
@@ -143,6 +144,21 @@ def _body_collector_ended(t):
     if not t.cancelled() and t.exception() is not None:
         print("rivia: body collector stopped (%s); everything else keeps running." % type(t.exception()).__name__,
               file=sys.stderr)
+
+
+def appraisal_routes():
+    """The app's layer 3 card (/app/appraisal, emotion spec Step 3.9) and the copy of her finished typed replies
+    (/app/appraisal/reply): what just happened and how far it would move her (shadow: a would-be copy of her mood; her
+    real mood never moves here), the shadow rewording with its fact check, and the Layer 3 values. Plain routes behind
+    the app token, never MCP tools, so Gemini can't see or call them. If they fail to load, the server keeps serving
+    without them."""
+    try:
+        import rivia_appraisal_app
+        return [_logged_route(r, "app_appraisal", "route.appraisal") for r in rivia_appraisal_app.routes()]
+    except Exception as e:  # noqa: BLE001
+        print("rivia: layer 3 card did not load (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return []
 
 
 def toggles_routes():

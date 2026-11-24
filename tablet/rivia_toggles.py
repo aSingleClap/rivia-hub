@@ -69,8 +69,20 @@ _p("l2.7", 2, "2.7", "2.7 Drift limits", "always_on", why=GUARD)
 _p("l2.8", 2, "2.8", "2.8 Weekly update check", "switch", default=False, env="RIVIA_DRIFT_WEEKLY")
 _p("l2.9", 2, "2.9", "2.9 Merge checks", needs=[("l2", H)])
 
-# Layer 3: rewording her replies (not installed)
-_p("l3", 3, None, "Layer 3: Rewording her replies", why="Step 3 isn't installed yet.")
+# Layer 3: reactions (Step 3, shadow). l3 gates the code-event tick, the Flash event menu and rewording;
+# RIVIA_APPRAISAL_SHADOW stays the env master off for the tick (checked where the tick runs).
+_p("l3", 3, None, "Layer 3: Reactions", "switch", default=True)
+_p("l3.1", 3, "3.1", "3.1 Events", needs=[("l3", H)],
+   why="Code events once a minute (RIVIA_APPRAISAL_SHADOW=0 turns them off); message events ride in the Flash read.")
+_p("l3.2", 3, "3.2", "3.2 Set pushes", needs=[("l3", H)])
+_p("l3.3", 3, "3.3", "3.3 Limit", needs=[("l3", H)])
+_p("l3.4", 3, "3.4", "3.4 Reading your message", needs=[("l3", H), ("l7", H), ("l7.1.flash", H)],
+   why="Message events ride in Step 7's Flash read.")
+_p("l3.5", 3, "3.5", "3.5 Caution flags", needs=[("l3", H)])
+_p("l3.6", 3, "3.6", "3.6 Rewording", "switch", needs=[("l3", H), ("l7.1.flash", H)], default=True)
+_p("l3.7", 3, "3.7", "3.7 Tone limits", needs=[("l3.6", H)])
+_p("l3.8", 3, "3.8", "3.8 Fact check", "always_on", why=GUARD)
+_p("l3.9", 3, "3.9", "3.9 Adjust values", needs=[("l3", H)])
 
 # Layer 4: her body
 _p("l4.collect", 4, "4.1", "4.1 to 4.3 Collecting health signals", "switch", default=True,
@@ -139,7 +151,9 @@ SWITCHES = [p["id"] for p in P if p["kind"] == "switch"]
 DEFAULTS = {i: BY_ID[i]["default"] for i in SWITCHES}
 FLASH = "l7.1.flash"           # writes through to Step 7's reading setting facts.flash_on (one value, not two)
 RUNS = ("on", "waiting")       # states in which a piece's work runs
-NOTES = {"l8": "Shadow: logs the style she would use. Her replies don't change until Step 3."}
+NOTES = {"l8": "Shadow: logs the style she would use. Her replies don't change until Step 3.",
+         "l3": "Shadow: logs events and a would-be mood; her real mood never moves.",
+         "l3.6": "Shadow: tries the rewording and keeps it for spot-checks; her real reply always stands."}
 
 
 class ToggleError(Exception):

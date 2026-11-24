@@ -465,9 +465,12 @@ if rs is not None:
     os.environ["RIVIA_BODY_COLLECTOR"] = "0"
     ok(run(started_task()) == "rivia-body-collector", "RIVIA_BODY_COLLECTOR=0 still starts the loop for Steps 5 and 6")
     os.environ.update(RIVIA_PLAN_SHADOW="0", RIVIA_TRUST_SHADOW="0")
-    ok(run(started_task()) is None, "RIVIA_BODY_COLLECTOR=0 with Steps 5 and 6 off by env starts nothing")
+    ok(run(started_task()) == "rivia-body-collector", "with only Step 3's event tick allowed, the loop still starts")
+    os.environ["RIVIA_APPRAISAL_SHADOW"] = "0"
+    ok(run(started_task()) is None, "RIVIA_BODY_COLLECTOR=0 with Steps 5, 6 and 3 off by env starts nothing")
     os.environ.pop("RIVIA_PLAN_SHADOW")
     os.environ.pop("RIVIA_TRUST_SHADOW")
+    os.environ.pop("RIVIA_APPRAISAL_SHADOW")
     os.environ.pop("RIVIA_BODY_COLLECTOR")
     sys.modules["rivia_body_collect"] = None  # makes the import inside start_body_collector fail
     ok(run(started_task()) is None, "a collector that won't import starts nothing, and the server carries on")

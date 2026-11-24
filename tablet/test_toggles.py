@@ -23,7 +23,7 @@ os.environ.update(RIVIA_DIR=RIVIA, RIVIA_HOME=RIVIA, RIVIA_DOTDIR=DOT, RIVIA_DB=
                   RIVIA_GOOGLE_TOKEN_PATH=os.path.join(DOT, "google_token.json"),
                   RIVIA_NRC_LEXICON=os.path.join(TMP, "none.txt"))
 for k in ("RIVIA_TRUST_KILL", "GEMINI_API_KEY", "RIVIA_BODY_COLLECTOR", "RIVIA_BODY_SHADOW", "RIVIA_PLAN_SHADOW",
-          "RIVIA_TRUST_SHADOW", "RIVIA_DRIFT_WEEKLY"):
+          "RIVIA_TRUST_SHADOW", "RIVIA_DRIFT_WEEKLY", "RIVIA_APPRAISAL_SHADOW"):
     os.environ.pop(k, None)
 sys.path.insert(0, HERE)
 
@@ -31,7 +31,9 @@ import uvicorn  # noqa: E402
 from starlette.applications import Starlette  # noqa: E402
 from starlette.responses import PlainTextResponse  # noqa: E402
 from starlette.routing import Route  # noqa: E402
+import rivia_appraisal_app as aapp  # noqa: E402
 import rivia_auth as ra  # noqa: E402
+import rivia_expression as ex  # noqa: E402
 import rivia_body_collect as collect  # noqa: E402
 import rivia_emotion_app as eapp  # noqa: E402
 import rivia_normal as normal  # noqa: E402
@@ -143,7 +145,7 @@ def counting_flash(*a, **k):
 flash.read = counting_flash
 server, BASE = serve(ra.build_app(app_mcp=standin_mcp(), admin_mcp=standin_mcp(),
                                   extra_routes=tapp.routes() + rapp.routes() + sapp.routes() + tgapp.routes()
-                                  + eapp.routes()))
+                                  + eapp.routes() + aapp.routes()))
 APP = ra.mint_door_token("app", 1)["token"]
 ADMIN = ra.mint_door_token("admin", 1)["token"]
 
@@ -162,7 +164,7 @@ ok(all(p["step"] is None or isinstance(p["step"], str) for p in r["pieces"]), "s
 ok(all(isinstance(p["layer"], int) and 1 <= p["layer"] <= 8 for p in r["pieces"]), "layer is a whole number 1 to 8")
 layers = [p["layer"] for p in r["pieces"]]
 ok(layers == sorted(layers) and set(layers) == set(range(1, 9)), "screen order, Layers 1 to 8")
-for lay in (1, 2, 5, 7, 8):
+for lay in (1, 2, 3, 5, 7, 8):
     first = [p for p in r["pieces"] if p["layer"] == lay][0]
     ok(first["id"] == "l%d" % lay and first["step"] is None, "Layer %d's whole-layer switch is first, step null" % lay)
 ok(all(p["state"] in ("on", "off", "off_by_parent", "off_by_env", "waiting", "nothing_to_switch", "always_on",
@@ -171,8 +173,8 @@ ok(all(k["kind"] in ("hard", "soft") for p in r["pieces"] for k in p["needs"] + 
 l7 = piece(r, "l7")
 ok(l7["where"] == "tablet" and l7["switchable"] and l7["value"] is True and l7["state"] == "on" and l7["why"] is None,
    "l7: a tablet switch, on")
-ok(set(l7["would_also_turn_off"]) == {"l7.1.flash", "l7.2", "l7.7", "l7.8", "l8"},
-   "l7 would also turn off 7.1, 7.2, 7.7, 7.8 and Layer 8: %s" % l7["would_also_turn_off"])
+ok(set(l7["would_also_turn_off"]) == {"l7.1.flash", "l7.2", "l7.7", "l7.8", "l8", "l3.6"},
+   "l7 would also turn off 7.1, 7.2, 7.7, 7.8, Layer 8 and 3.6 rewording: %s" % l7["would_also_turn_off"])
 ok({"id": "l8", "kind": "hard"} in l7["needed_by"] and {"id": "l7.2", "kind": "hard"} in l7["needed_by"],
    "l7's needed_by names its hard dependents")
 for pid, step, need in (("p1.5", "1.5", "l1"), ("p2.4", "2.4", "l2"), ("p6.3.thumbs", "6.3", None)):
@@ -212,8 +214,9 @@ print("2. defaults equal today")
 vals = tg.values()
 ok(all(vals[i] == tg.DEFAULTS[i] for i in tg.SWITCHES if i != tg.FLASH) and vals[tg.FLASH] is True,
    "no file: every switch at the code's default")
-ok(all(tg.runs(i) for i in ("l1", "l2", "l4.collect", "l4.dials", "l4.8", "l5", "l6.score", "l6.words", "l7",
-                            "l7.1.flash", "l7.2", "l7.7", "l7.8", "l8")), "no file: everything that runs today runs")
+ok(all(tg.runs(i) for i in ("l1", "l2", "l3", "l3.6", "l4.collect", "l4.dials", "l4.8", "l5", "l6.score",
+                            "l6.words", "l7", "l7.1.flash", "l7.2", "l7.7", "l7.8", "l8")),
+   "no file: everything that runs today runs (Layer 3 as packaged: on)")
 ok(not tg.runs("l2.8") and piece(r, "l2.8")["state"] == "off_by_env", "2.8 weekly check: off, as today (env unset)")
 with open(tg.path(), "w") as f:
     f.write('{"version": 1, "choices": {"l7": fal')
@@ -298,7 +301,7 @@ def fake_read(cursor=None, window_s=None):
     return {"battery": 80.0, "memory_used": 40.0}, {"local_ok": True}, None
 
 
-CALLS = {"dials": 0, "plan": 0, "trust": 0}
+CALLS = {"dials": 0, "plan": 0, "trust": 0, "appraisal": 0}
 
 
 class FakeShadow:
@@ -335,7 +338,19 @@ class FakeTrust:
         return {"judged": 0, "trust": {"value": 0.2}, "satisfaction": {"value": None}, "killed": False}
 
 
+class FakeAppraisal:
+    @staticmethod
+    def enabled():
+        return os.environ.get("RIVIA_APPRAISAL_SHADOW", "1") != "0"
+
+    @staticmethod
+    def tick(con, now):
+        CALLS["appraisal"] += 1
+        return {"events": 0}
+
+
 collect.shadow, collect.progress, collect.trust_shadow = FakeShadow, FakeProgress, FakeTrust
+collect.appraisal = FakeAppraisal
 
 
 def tick():
@@ -345,18 +360,22 @@ def tick():
 
 
 out = tick()
-ok(out["ok"] and out["stored"] == 2 and CALLS == {"dials": 1, "plan": 1, "trust": 1},
-   "defaults: reads, dials, Step 5 and Step 6 all run, as today")
-for sid, key in (("l4.dials", "dials"), ("l5", "plan"), ("l6.score", "trust")):
+ok(out["ok"] and out["stored"] == 2 and CALLS == {"dials": 1, "plan": 1, "trust": 1, "appraisal": 1},
+   "defaults: reads, dials, Step 5, Step 6 and Step 3's event tick all run")
+for sid, key in (("l4.dials", "dials"), ("l5", "plan"), ("l6.score", "trust"), ("l3", "appraisal")):
     tg.set_switch(sid, False, door="app_button")
     tick()
-    ok(CALLS[key] == 0 and sum(CALLS.values()) == 2, "%s off: its tick work is skipped, the rest runs" % sid)
+    ok(CALLS[key] == 0 and sum(CALLS.values()) == 3, "%s off: its tick work is skipped, the rest runs" % sid)
     clear()
+os.environ["RIVIA_APPRAISAL_SHADOW"] = "0"
+tick()
+ok(CALLS["appraisal"] == 0 and CALLS["plan"] == 1, "RIVIA_APPRAISAL_SHADOW=0 stays the env master off for the tick")
+os.environ.pop("RIVIA_APPRAISAL_SHADOW")
 samples0, reads0 = count("samples"), count("reads")
 tg.set_switch("l4.collect", False, door="app_button")
 out = tick()
-ok(out["ok"] and out.get("body") == "off" and CALLS == {"dials": 0, "plan": 1, "trust": 1},
-   "l4.collect off and l5 on: no body read, no dials, Step 5 still scores, Step 6 still runs")
+ok(out["ok"] and out.get("body") == "off" and CALLS == {"dials": 0, "plan": 1, "trust": 1, "appraisal": 1},
+   "l4.collect off and l5 on: no body read, no dials, Steps 5, 6 and 3 still run")
 ok(count("samples") == samples0 and count("reads") == reads0, "no body signal rows and no reads row while Layer 4 is off")
 clear()
 
@@ -523,8 +542,10 @@ async def started():
 
 asyncio.run(started())
 os.environ.update(RIVIA_PLAN_SHADOW="0", RIVIA_TRUST_SHADOW="0")
-ok(not collect.loop_enabled(), "with Layer 4, Step 5 and Step 6 all off by env, the loop doesn't start")
-for k in ("RIVIA_BODY_COLLECTOR", "RIVIA_PLAN_SHADOW", "RIVIA_TRUST_SHADOW"):
+ok(collect.loop_enabled(), "with only Step 3's tick allowed by env, the loop still starts")
+os.environ["RIVIA_APPRAISAL_SHADOW"] = "0"
+ok(not collect.loop_enabled(), "with Layer 4, Steps 5, 6 and 3 all off by env, the loop doesn't start")
+for k in ("RIVIA_BODY_COLLECTOR", "RIVIA_PLAN_SHADOW", "RIVIA_TRUST_SHADOW", "RIVIA_APPRAISAL_SHADOW"):
     os.environ.pop(k)
 ok(collect.loop_enabled(), "env flags back to unset: the loop starts as today")
 
@@ -538,6 +559,57 @@ ok(not os.path.exists(tg.path()) or "l7.1.flash" not in json.load(open(tg.path()
 ok(piece(r, "l8")["state"] == "waiting", "Layer 8 waits (soft) while the Flash read is off")
 rset.save({"facts.flash_on": 1}, door="app_button")
 ok(piece(http("/app/toggles", APP)[1], "l7.1.flash")["value"] is True, "set back from Step 7's card: the switch follows")
+clear()
+
+print("7b. Layer 3 (Step 3)")
+s_, r = http("/app/toggles", APP)
+l3 = piece(r, "l3")
+ok(l3["switchable"] and l3["value"] is True and l3["state"] == "on" and l3["step"] is None and l3["where"] == "tablet",
+   "l3: a whole-layer tablet switch, on by default (as packaged)")
+ok(piece(r, "l3.6")["state"] == "on" and piece(r, "l3.6")["needs"] == [{"id": "l3", "kind": "hard"},
+                                                                       {"id": "l7.1.flash", "kind": "hard"}],
+   "3.6 rewording: on, needs Layer 3 and the 7.1 Flash read (hard)")
+ok(piece(r, "l3.8")["state"] == "always_on" and not piece(r, "l3.8")["switchable"], "3.8 fact check: always on")
+ok({n["id"] for n in piece(r, "l3.4")["needs"]} == {"l3", "l7", "l7.1.flash"}
+   and all(n["kind"] == "hard" for n in piece(r, "l3.4")["needs"]), "message events need l7 and l7.1.flash (hard)")
+ok(all(p["state"] == "nothing_to_switch" and p["step"] for p in r["pieces"] if p["layer"] == 3
+       and p["id"] not in ("l3", "l3.6", "l3.8")), "the other Layer 3 rows: nothing to switch, each with its step")
+ok([p["step"] for p in r["pieces"] if p["layer"] == 3] == [None] + ["3.%d" % i for i in range(1, 10)],
+   "Layer 3 rows in step order 3.1 to 3.9")
+ok(l3["would_also_turn_off"] == ["l3.6"], "turning Layer 3 off would also turn off rewording")
+ok(http("/app/toggles", APP, {"id": "l3.8", "on": False})[1]["code"] == "not_switchable", "3.8 can't be switched")
+ok(http("/app/appraisal")[0] == 401 and http("/app/appraisal/reply", body={"message_id": "x", "text": "y"})[0] == 401,
+   "/app/appraisal and its reply copy: app token only")
+ok("switched_off" not in http("/app/appraisal", APP)[1], "defaults: the Layer 3 card has no switched-off note")
+s_, r = http("/app/toggles", APP, {"id": "l3", "on": False})
+ok(piece(r, "l3.6")["state"] == "off_by_parent" and piece(r, "l3.6")["why"] == "Off because Layer 3: Reactions is off",
+   "l3 off forces 3.6 off and says why")
+ok(http("/app/toggles", APP, {"id": "l3.6", "on": True})[1]["code"] == "parent_off", "3.6 on while l3 is off: 409")
+ok(http("/app/appraisal", APP)[1]["switched_off"].startswith("Layer 3 is switched off"), "the card says Layer 3 is off")
+ok(not flash.events_on() and flash.body("hello")["system_instruction"] == flash.RATER_PLAIN
+   and "events" not in flash.body("hello")["response_format"]["schema"]["properties"],
+   "l3 off: Step 7's Flash call goes out without Step 3's event menu")
+clear()
+ok(flash.events_on() and flash.body("hello")["system_instruction"] == flash.RATER
+   and "events" in flash.body("hello")["response_format"]["schema"]["properties"],
+   "l3 on: the event menu rides in the same call, as packaged")
+tg.set_switch("l7.1.flash", False, door="app_button")
+ok(piece(tg.view(), "l3.6")["state"] == "off_by_parent" and not tg.runs("l3.6"), "7.1 Flash off forces 3.6 off")
+rset.save({"facts.flash_on": 1}, door="app_button")
+tg.set_switch("l3.6", False, door="app_button")
+c = normal.db_open()
+try:
+    ex.prepare(c)
+    words_ = "This is a long friendly reply about nothing in particular that rambles on for well over fifteen words " \
+             "so it would qualify for rewording."
+    row = ex.take_reply({"message_id": "rw1", "text": words_, "at": int(time.time() * 1000), "tool_only": False}, con=c)
+    if row and row["outcome"] == "waiting":
+        ok(ex.reword("rw1", con=c) == "off", "3.6 off: no rewording call, the outcome is 'off'")
+    else:
+        ok(row is not None, "reply copy kept (outcome %s)" % (row or {}).get("outcome"))
+finally:
+    c.close()
+ok(http("/app/appraisal", APP)[1]["switched_off"].startswith("3.6 rewording is switched off"), "the card says so")
 clear()
 
 print("8. env flags and never a tool")
@@ -560,7 +632,7 @@ for name, fn in CHECKS:
     ok(agree, "%s reads the same in the switches as in its own module" % name)
 ok(real_shadow is not None, "the dials module still loads")
 import ast  # noqa: E402
-for f in ("rivia_toggles.py", "rivia_toggles_app.py"):
+for f in ("rivia_toggles.py", "rivia_toggles_app.py"):  # (Layer 3's own modules are checked by test_appraisal_app)
     tree = ast.parse(open(os.path.join(HERE, f)).read())
     mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names} | \
         {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}

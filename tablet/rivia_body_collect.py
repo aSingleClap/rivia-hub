@@ -40,6 +40,13 @@ try:  # Step 6 trust and accuracy in shadow mode: same rule, the collector never
     import rivia_trust_shadow as trust_shadow
 except Exception:  # noqa: BLE001
     trust_shadow = None
+# Step 3: after Step 6, rivia_appraisal turns her tool calls, your thumbs, the plan checks and her unanswered questions
+# into events and moves a would-be copy of her mood in body.db (RIVIA_APPRAISAL_SHADOW=0 switches it off; so does the
+# l3 switch). It reads core.db and emotion.db read-only and writes body.db only.
+try:  # Step 3 code-detected events in shadow mode: same rule, the collector never depends on it
+    import rivia_appraisal as appraisal
+except Exception:  # noqa: BLE001
+    appraisal = None
 import rivia_store as store
 import rivia_toggles as toggles  # the layer and piece switches (standard library only; checked each tick)
 
@@ -73,7 +80,8 @@ def loop_enabled():
     Step 5 (RIVIA_PLAN_SHADOW) or Step 6 (RIVIA_TRUST_SHADOW). Since the switches (Nov 24) RIVIA_BODY_COLLECTOR=0
     only stops Layer 4's reads and the dials, never Steps 5 and 6. The switches themselves are checked every tick."""
     return (enabled() or (progress is not None and progress.enabled())
-            or (trust_shadow is not None and trust_shadow.enabled()))
+            or (trust_shadow is not None and trust_shadow.enabled())
+            or (appraisal is not None and appraisal.enabled()))
 
 
 def shadow_enabled():
@@ -131,6 +139,7 @@ def collect_once(con=None, now=None, read=None):
     dials_on = shadow is not None and shadow_enabled() and toggles.runs("l4.dials")
     plan_on = progress is not None and progress.enabled() and toggles.runs("l5")
     trust_on = trust_shadow is not None and trust_shadow.enabled() and toggles.runs("l6.score")
+    appraisal_on = appraisal is not None and appraisal.enabled() and toggles.runs("l3")
     try:
         try:
             if collect_on:
@@ -174,6 +183,14 @@ def collect_once(con=None, now=None, read=None):
                                     "satisfaction": res6["satisfaction"]["value"], "killed": res6["killed"]}
                 except Exception as e:  # noqa: BLE001
                     out["trust_error"] = type(e).__name__
+            # Step 3: code-detected events, after Step 6 so a plan Step 6 just judged is counted this tick. Body.db
+            # only; tick() never raises, and a failure changes nothing else. Runs with Layer 4 off too (the split).
+            if appraisal_on:
+                try:
+                    res3 = appraisal.tick(con, now_epoch)
+                    out["appraisal"] = {"events": res3["events"], "error": res3.get("error")}
+                except Exception as e:  # noqa: BLE001
+                    out["appraisal_error"] = type(e).__name__
         except Exception as e:  # noqa: BLE001
             out["error"] = type(e).__name__
         out["took_ms"] = int((time.perf_counter() - t0) * 1000)
