@@ -460,8 +460,14 @@ if rs is not None:
         return name
 
     ok(run(started_task()) == "rivia-body-collector", "start_body_collector starts a task named rivia-body-collector")
+    # The switches (Nov 24, BUILD.md change 1): the minute loop is split from Layer 4. RIVIA_BODY_COLLECTOR=0 stops
+    # only Layer 4's reads and the dials; the loop keeps ticking for Steps 5 and 6. With all three off, nothing starts.
     os.environ["RIVIA_BODY_COLLECTOR"] = "0"
-    ok(run(started_task()) is None, "RIVIA_BODY_COLLECTOR=0 starts nothing")
+    ok(run(started_task()) == "rivia-body-collector", "RIVIA_BODY_COLLECTOR=0 still starts the loop for Steps 5 and 6")
+    os.environ.update(RIVIA_PLAN_SHADOW="0", RIVIA_TRUST_SHADOW="0")
+    ok(run(started_task()) is None, "RIVIA_BODY_COLLECTOR=0 with Steps 5 and 6 off by env starts nothing")
+    os.environ.pop("RIVIA_PLAN_SHADOW")
+    os.environ.pop("RIVIA_TRUST_SHADOW")
     os.environ.pop("RIVIA_BODY_COLLECTOR")
     sys.modules["rivia_body_collect"] = None  # makes the import inside start_body_collector fail
     ok(run(started_task()) is None, "a collector that won't import starts nothing, and the server carries on")

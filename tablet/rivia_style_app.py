@@ -38,7 +38,14 @@ def view(con=None, now=None):
     eff = ssettings.effective()
     v = style.view(con=con, now=now, tune=ssettings.tune(eff["values"]))
     sv = ssettings.view()
-    return {**v, **sv}
+    out = {**v, **sv}
+    try:
+        import rivia_toggles as toggles
+        if not toggles.runs("l8"):
+            out["note"] = "Layer 8 is switched off: nothing new is worked out; this shows what's stored."
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def handle_settings(body):

@@ -330,6 +330,9 @@ def shifts_for(con, day, now):
 def situation(con, at, now=None, tune=None):
     """7.2: which situation a message at `at` is in. Reads his calendar for that day and the day before."""
     now = time.time() if now is None else now
+    import rivia_toggles as toggles
+    if not toggles.runs("l7.2"):
+        return "other"                   # 7.2 switched off: no calendar read, every message counts as "other"
     t = _tune(tune)
     day = _day(at)
     prev = (datetime.fromisoformat(day) - timedelta(days=1)).date().isoformat()
@@ -398,7 +401,9 @@ def take(body, con=None, now=None, tune=None, lex=None):
         con.execute("delete from reading_messages where at < ?", (now - t["keep_days"] * 86400,))
         con.execute("delete from reading_log where at < ?", (now - t["keep_days"] * 86400,))
         answer_last_ask(con, text, at, now)
-        judge(con, now=now, tune=t, message_id=mid)
+        import rivia_toggles as toggles
+        if toggles.runs("l7.8"):         # 7.8 switched off: nothing judged, no would-be questions logged
+            judge(con, now=now, tune=t, message_id=mid)
         return message(con, mid)
     finally:
         if own:
@@ -590,6 +595,9 @@ def find_patterns(con, now=None, tune=None):
     changed by code, only its numbers are refreshed."""
     now = time.time() if now is None else now
     t = _tune(tune)
+    import rivia_toggles as toggles
+    if not toggles.runs("l7.7"):
+        return []                        # 7.7 switched off: no new guesses; saved ones stay as they are
     prepare(con)
     msgs = messages(con, now - t["keep_days"] * 86400)
     found = []
