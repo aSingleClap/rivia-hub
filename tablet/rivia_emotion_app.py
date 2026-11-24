@@ -156,6 +156,16 @@ def handle(body):
         return _bad("bad_request", "send exactly one of set, nudge, end_test, unlock or lock")
     action = (set(ACTIONS) & set(body)).pop()
 
+    # The layer switches (rivia_toggles, Nov 24): Layer 1 off refuses every write; Layer 2 off refuses mood and
+    # baseline writes. Reads (GET) still answer. Unlock and lock only open or close the lock, so they aren't writes.
+    if action in ("set", "nudge", "end_test"):
+        import rivia_toggles as toggles
+        target = body.get("end_test") if action == "end_test" else body.get("layer", emo.LAYER)
+        if not toggles.runs("l1"):
+            return 409, {"ok": False, "code": "layer_off", "error": "Layer 1 is off"}
+        if target in LOCKED and not toggles.runs("l2"):
+            return 409, {"ok": False, "code": "layer_off", "error": "Layer 2 is off"}
+
     if action in ("unlock", "lock"):
         if set(body) != {action} or body[action] is not True:
             return _bad("bad_request", "send {\"%s\": true} on its own" % action)
@@ -207,12 +217,29 @@ def handle(body):
     return _moved(r, layer, tag)
 
 
+def _layers_off():
+    """A plain line when Layer 1 or 2 is switched off, else None (then the reply is exactly as before)."""
+    try:
+        import rivia_toggles as toggles
+        if not toggles.runs("l1"):
+            return "Layer 1 is off: the dial is paused (reads still answer)."
+        if not toggles.runs("l2"):
+            return "Layer 2 is off: mood and baseline changes are paused (reads still answer)."
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 async def emotion(request: Request):
     if request.method not in ("GET", "HEAD", "POST"):
         return _err(405, "method_not_allowed", "use GET or POST")
     try:
         if request.method in ("GET", "HEAD"):
-            return JSONResponse(get_reply())
+            reply = get_reply()
+            off = _layers_off()
+            if off:
+                reply["note"] = off
+            return JSONResponse(reply)
         raw = await request.body()
         if len(raw) > MAX_BODY:
             return _err(413, "too_big", "body is over %d bytes" % MAX_BODY)

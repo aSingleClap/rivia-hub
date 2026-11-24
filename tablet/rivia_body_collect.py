@@ -41,6 +41,7 @@ try:  # Step 6 trust and accuracy in shadow mode: same rule, the collector never
 except Exception:  # noqa: BLE001
     trust_shadow = None
 import rivia_store as store
+import rivia_toggles as toggles  # the layer and piece switches (standard library only; checked each tick)
 
 INTERVAL_S = 60          # one reading a minute: 15 samples in each of 4.3's 15-minute windows
 MIN_INTERVAL_S = 30      # RIVIA_BODY_INTERVAL_S below this is raised to it (each tick makes 3 local/public checks)
@@ -65,6 +66,14 @@ create table if not exists reads(
 def enabled():
     """On unless RIVIA_BODY_COLLECTOR is 0/false/off/no. Same switch style as RIVIA_SIGNIN_CHECK."""
     return os.environ.get("RIVIA_BODY_COLLECTOR", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def loop_enabled():
+    """The minute loop runs while any of its parts may run by env flag: Layer 4's reads (RIVIA_BODY_COLLECTOR),
+    Step 5 (RIVIA_PLAN_SHADOW) or Step 6 (RIVIA_TRUST_SHADOW). Since the switches (Nov 24) RIVIA_BODY_COLLECTOR=0
+    only stops Layer 4's reads and the dials, never Steps 5 and 6. The switches themselves are checked every tick."""
+    return (enabled() or (progress is not None and progress.enabled())
+            or (trust_shadow is not None and trust_shadow.enabled()))
 
 
 def shadow_enabled():
@@ -117,29 +126,38 @@ def collect_once(con=None, now=None, read=None):
     except Exception as e:  # noqa: BLE001
         out["error"] = "db_open: %s" % type(e).__name__
         return out
+    # The switches (rivia_toggles), checked every tick. With no toggles.json this is exactly the old tick.
+    collect_on = toggles.runs("l4.collect")              # includes RIVIA_BODY_COLLECTOR
+    dials_on = shadow is not None and shadow_enabled() and toggles.runs("l4.dials")
+    plan_on = progress is not None and progress.enabled() and toggles.runs("l5")
+    trust_on = trust_shadow is not None and trust_shadow.enabled() and toggles.runs("l6.score")
     try:
         try:
-            cursor = _load_cursor(con, now_epoch)
-            signals, extras, cursor = read(cursor=cursor, window_s=WINDOW_S)
-            out["signals"], out["extras"] = signals, extras
-            rows = [(name, value, now_epoch) for name, value in sorted(signals.items())
-                    if name not in NOT_A_DIAL and value is not None]
-            res = normal.record_many(rows, con=con)
-            out["stored"] = res["stored"]
-            out["rejected"] = [[rows[i][0], code] for i, code, _ in res["rejected"]]
-            if cursor:
-                store.set_meta(con, CURSOR_KEY, json.dumps(cursor))
+            if collect_on:
+                cursor = _load_cursor(con, now_epoch)
+                signals, extras, cursor = read(cursor=cursor, window_s=WINDOW_S)
+                out["signals"], out["extras"] = signals, extras
+                rows = [(name, value, now_epoch) for name, value in sorted(signals.items())
+                        if name not in NOT_A_DIAL and value is not None]
+                res = normal.record_many(rows, con=con)
+                out["stored"] = res["stored"]
+                out["rejected"] = [[rows[i][0], code] for i, code, _ in res["rejected"]]
+                if cursor:
+                    store.set_meta(con, CURSOR_KEY, json.dumps(cursor))
+            else:
+                out["body"] = "off"   # Layer 4 is switched off (or RIVIA_BODY_COLLECTOR=0): no body reads this tick
             out["ok"] = True
             # Step 4.9: the dials in shadow mode. Logged to body.db only; her mood is never touched. A failure here
-            # is noted and never stops the reading from being stored.
-            if shadow is not None and shadow_enabled():
+            # is noted and never stops the reading from being stored. Needs this tick's body reading.
+            if collect_on and dials_on:
                 try:
                     out["shadow"] = shadow.shadow_tick(con, now_epoch)
                 except Exception as e:  # noqa: BLE001
                     out["shadow_error"] = type(e).__name__
             # Step 5.6: the plan trend, right after the dials so it sees this tick's body pull (counted once).
-            # Logged to body.db only, like the dials; a failure is noted and changes nothing else.
-            if progress is not None and progress.enabled():
+            # Logged to body.db only, like the dials; a failure is noted and changes nothing else. With Layer 4 off
+            # the body share is zero, which Step 5 already handles.
+            if plan_on:
                 try:
                     share = (out.get("shadow") or {}).get("share") or (0.0, 0.0, 0.0)
                     res = progress.shadow_tick(con, now_epoch, body_share=share)
@@ -149,7 +167,7 @@ def collect_once(con=None, now=None, read=None):
                     out["plan_error"] = type(e).__name__
             # Step 6: judge the days Step 5 just scored, then trust, satisfaction and the unlock ladder. After
             # Step 5 so a newly scored day is there. Logged to body.db only; a failure is noted and changes nothing.
-            if trust_shadow is not None and trust_shadow.enabled():
+            if trust_on:
                 try:
                     res6 = trust_shadow.shadow_tick(con, now_epoch)
                     out["trust"] = {"judged": res6["judged"], "trust": res6["trust"]["value"],
@@ -159,6 +177,8 @@ def collect_once(con=None, now=None, read=None):
         except Exception as e:  # noqa: BLE001
             out["error"] = type(e).__name__
         out["took_ms"] = int((time.perf_counter() - t0) * 1000)
+        if not collect_on:
+            return out   # the reads table is Layer 4's own log: nothing is written to it while Layer 4 is off
         try:
             con.execute("insert or replace into reads values(?,?,?,?,?,?,?,?)",
                         (now_epoch, out["took_ms"], int(out["ok"]), out["error"],

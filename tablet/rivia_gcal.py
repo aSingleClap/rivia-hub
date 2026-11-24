@@ -680,7 +680,8 @@ async def signin_check_loop(*, get_now=None, sleep=None, interval_s=None):
                 # files and one docs page, 30 s timeout each) run in a thread so the server keeps
                 # answering while they wait.
                 import rivia_drift_weekly as drift_weekly
-                if drift_weekly.enabled() and drift_weekly.weekly_due(now):
+                import rivia_toggles as toggles   # 2.8's switch (off by default) and RIVIA_DRIFT_WEEKLY must both allow it
+                if drift_weekly.enabled() and toggles.runs("l2.8") and drift_weekly.weekly_due(now):
                     await asyncio.to_thread(drift_weekly.run_weekly, now)
             except Exception as e:  # noqa: BLE001
                 print("rivia: drift check failed (%s); continuing." % type(e).__name__,

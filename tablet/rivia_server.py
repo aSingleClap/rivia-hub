@@ -114,17 +114,19 @@ def public_app():
 
     return rivia_auth.build_app(lifespan=lifespan, app_mcp=app_inner, admin_mcp=admin_inner,
                                 extra_routes=emotion_routes() + progress_routes() + trust_routes() + style_routes()
-                                + reading_routes())
+                                + toggles_routes() + reading_routes())
 
 
 def start_body_collector():
-    """The body-signal collector (rivia_body_collect, emotion spec Step 4.2) as its own background task, or None
-    when RIVIA_BODY_COLLECTOR=0 or it fails to load. It reads her health and writes only body.db. It never imports
-    the Google or sign-in code (its test checks), and if it fails to load the server and the sign-in check carry on
-    without it. Jordan, Nov 22: "As long as the connector doesn't sign me out then that's fine"."""
+    """The minute loop (rivia_body_collect) as its own background task, or None when nothing it runs is allowed or it
+    fails to load. Since the switches (Nov 24) the loop is split from Layer 4: it keeps ticking while Layer 4's reads
+    (RIVIA_BODY_COLLECTOR), Step 5 (RIVIA_PLAN_SHADOW) or Step 6 (RIVIA_TRUST_SHADOW) may run, and each tick runs only
+    the parts that are on. It writes only body.db and never imports the Google or sign-in code (its test checks); if
+    it fails to load, the server and the sign-in check carry on without it. Jordan, Nov 22: "As long as the
+    connector doesn't sign me out then that's fine"."""
     try:
         import rivia_body_collect
-        if not rivia_body_collect.enabled():
+        if not rivia_body_collect.loop_enabled():
             return None
         t = asyncio.create_task(rivia_body_collect.loop(), name="rivia-body-collector")
         t.add_done_callback(_body_collector_ended)
@@ -141,6 +143,18 @@ def _body_collector_ended(t):
     if not t.cancelled() and t.exception() is not None:
         print("rivia: body collector stopped (%s); everything else keeps running." % type(t.exception()).__name__,
               file=sys.stderr)
+
+
+def toggles_routes():
+    """The layer and piece switches (/app/toggles, Nov 24: "Toggles first"). A plain route behind the app token, never
+    an MCP tool, so Gemini can't see or call it. If it fails to load, the server keeps serving without it."""
+    try:
+        import rivia_toggles_app
+        return [_logged_route(r, "app_toggles", "route.toggles") for r in rivia_toggles_app.routes()]
+    except Exception as e:  # noqa: BLE001
+        print("rivia: layer switches did not load (%s); everything else keeps running." % type(e).__name__,
+              file=sys.stderr)
+        return []
 
 
 def emotion_routes():

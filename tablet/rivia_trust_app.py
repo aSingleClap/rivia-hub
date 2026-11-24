@@ -155,6 +155,11 @@ def handle_words(body, con=None, now=None):
         return 400, {"ok": False, "code": "bad_value", "error": "text must be up to %d characters" % sat.WORDS_MAX}
     if reply is not None and (not isinstance(reply, str) or len(reply) > REPLY_MAX):
         return 400, {"ok": False, "code": "bad_value", "error": "reply_text must be up to %d characters" % REPLY_MAX}
+    import rivia_toggles as toggles
+    if not toggles.runs("l6.words"):
+        # 6.3's praise/correction check is switched off: still a valid copy, answered 200, so Step 7 can read it.
+        return 200, {"ok": True, "counted": False, "heard": None, "saved": None,
+                     "note": "Your words copy (6.3) is switched off; nothing was counted"}
     value, heard = sat.read_words(text)
     con, own = _open(con)
     try:
@@ -180,6 +185,9 @@ def reading_after(body, status):
     Flash read, all in the background so the phone never waits. Errors stay there: Step 6's answer is already sent."""
     if status != 200 or not isinstance(body, dict):
         return None
+    import rivia_toggles as toggles
+    if not toggles.runs("l7"):
+        return None   # Layer 7 is switched off: the copy is dropped unread (Layer 8 needs it, so it stops too)
     return lambda: reading_run(body)
 
 
@@ -194,8 +202,10 @@ def reading_run(body):
         import sys
         print("rivia: Step 7 reading skipped a message (%s)" % type(e).__name__, file=sys.stderr)
     try:
-        import rivia_style as style   # Step 8 (DRAFT Nov 24): her would-be style, after Step 7 has read the message
-        style.take(body.get("message_id"), body.get("text"))
+        import rivia_toggles as toggles
+        if toggles.runs("l8"):
+            import rivia_style as style   # Step 8: her would-be style, after Step 7 has read the message
+            style.take(body.get("message_id"), body.get("text"))
     except Exception as e:  # noqa: BLE001  (Step 8 failing never stops Steps 6 and 7)
         import sys
         print("rivia: Step 8 style skipped a message (%s)" % type(e).__name__, file=sys.stderr)

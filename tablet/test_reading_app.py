@@ -120,6 +120,19 @@ st, r = http("/app/trust/words", APP, {"message_id": "w1", "text": "Good plan, t
                                        "reply_at": now_ms - 90000})
 ok(st == 200 and r["counted"] and r["saved"]["value"] == 1.0, "Step 6's answer is unchanged (praise heard)")
 ok(wait_for(lambda: len(stored()) == 1), "Step 7 read it in the background")
+
+
+def flash_settled():
+    # The Flash step fills flash_status a moment after the row appears (same background task): wait for it, so the
+    # check below isn't a race (it failed about half the time when read straight away).
+    c_ = normal.db_open()
+    try:
+        return rd.message(c_, "w1")["flash_status"] != "waiting"
+    finally:
+        c_.close()
+
+
+wait_for(flash_settled)
 c = normal.db_open()
 m = rd.message(c, "w1")
 dump = str(c.execute("select * from reading_messages").fetchall())
