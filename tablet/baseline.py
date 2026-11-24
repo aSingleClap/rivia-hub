@@ -322,8 +322,22 @@ def interaction(body: dict, api_key: str, max_wait_s: int = 180) -> dict:
     return res
 
 
+def _text_parts(content) -> list:
+    if isinstance(content, list):
+        return [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+    if isinstance(content, dict) and content.get("type") == "text":
+        return [content.get("text", "")]
+    return []
+
+
 def output_text(res: dict) -> str:
-    """Text parts of outputs, thought summaries skipped (as the app's extractor)."""
+    """The reply's text, thought steps skipped. Gemini's interactions replies (seen Nov 24 from gemini-3.8-flash) put
+    it in res["steps"]: a "thought" step (signature only), then a "model_output" step whose content holds the text
+    parts. Before this, only res["outputs"] was read, so every live reply came back "" and Step 7 marked each Flash
+    read "unusable". The older "outputs" shape is still read when there's no model_output step."""
+    steps = [s for s in (res.get("steps") or []) if isinstance(s, dict) and s.get("type") == "model_output"]
+    if steps:
+        return "".join(t for s in steps for t in _text_parts(s.get("content")))
     out = []
     for step in res.get("outputs") or []:
         content = step.get("content")

@@ -3,3 +3,6 @@ Frozen copies used only to build older emotion.db files in tests (2.9 merge). Ne
   2.1/rivia_emotion.py    the Step 2.1 draft; test_drift_limits.py opens a 2.1 DB with it.
 They sit under tests/ so the Step 1 scans (test_changelog.py: nothing else writes the state; test_emotion_app.py)
 don't count them; those scans look at the top-level folder only.
+  flash_reply_steps_20261124.json  one real Gemini 3.8 Flash interactions reply (Nov 24, to the made-up sentence
+                          "heading to the gym after work"; no key, nothing of Jordan's): the "steps" shape that
+                          baseline.output_text() reads. test_output_text.py uses it.
