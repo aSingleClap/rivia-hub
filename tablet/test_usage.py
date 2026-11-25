@@ -62,10 +62,10 @@ ok(set(v["kinds"]) == set(gl.DEFAULT_LIMITS), "1 every kind listed")
 ok(all(len(x) == 14 for x in v["kinds"].values()), "1 one entry per day per kind")
 ok(v["kinds"]["plan_run"][0] == {"goals": 0, "tokens_avg": 0, "tokens_max": 0, "would_stop": 0}, "1 empty day")
 ok(list(v["models"])[:3] == list(ml.MODELS), "1 Rivia's models first")
-ok(v["models"]["gemini-4-neon"][0] == {"requests": 0, "peak_rpm": 0, "peak_tpm": 0}, "1 empty model day")
-ok(v["seen"] == ["tablet"], "1 seen")
-ok("phone" in v["seen_note"] and "3.8 Flash" in v["seen_note"] and "same per-project limits" in v["seen_note"],
-   "1 seen note says the phone's Live calls are left out")
+ok(v["models"]["gemini-4-neon"][0] == {"requests": 0, "peak_rpm": 0, "peak_tpm": 0, "tokens_in": 0, "tokens_out": 0,
+                                        "phone_requests": 0}, "1 empty model day")
+ok(v["seen"] == ["tablet", "phone"], "1 seen: tablet and phone")
+ok("phone app reports" in v["seen_note"] and "Arrival speech" in v["seen_note"], "1 seen note says what's counted")
 json.dumps(v)
 ok(True, "1 JSON-safe")
 
@@ -137,7 +137,9 @@ ok(len(us.load_calls(con, 0)) == 2, "7 calls older than a month pruned")
 raises(lambda: us.record_call(con, "gemini-4-hydrogen", NOW, input_tokens=-1), "bad_value", "7 bad tokens refused")
 v = us.usage_view(now=NOW, con=con)
 ok(v["kinds"]["plan_run"][-1]["tokens_max"] == 4242, "7 usage_view reads goal_log, skips a broken line")
-ok(v["models"]["gemini-4-hydrogen"][-1] == {"requests": 2, "peak_rpm": 2, "peak_tpm": 1000}, "7 usage_view models")
+ok(v["models"]["gemini-4-hydrogen"][-1] == {"requests": 2, "peak_rpm": 2, "peak_tpm": 1000,
+                                              "tokens_in": 1000, "tokens_out": 40, "phone_requests": 0},
+   "7 usage_view models")
 before = con.total_changes
 us.usage_view(now=NOW, con=con)
 ok(con.total_changes == before, "7 usage_view writes nothing")
@@ -180,6 +182,36 @@ ok(g["gemini-4-neon"]["rpm"]["status"] == "near" and g["gemini-4-hydrogen"]["wor
 del sys.modules["rivia_progress_settings"]
 sys.path[:] = saved
 ok(not hasattr(ml, "set_limits"), "9 no second store of limits here")
+
+# 11. Phone calls (Nov 25): the app reports its own Gemini calls; same id twice counts once; numbers only.
+con = sqlite3.connect(":memory:", isolation_level=None)
+F = "gemini-3.8-flash"
+def pc(i, at_, inp=500, out=120, kind="rivia_text", model=F):
+    return {"id": "r-%04x-%d" % (i, int(at_)), "at": at_, "model": model, "in": inp, "out": out, "kind": kind}
+r = us.record_phone_calls(con, [pc(1, NOW - 60), pc(2, NOW - 30, kind="rivia_voice")], NOW)
+ok(r == {"added": 2, "already": 0, "too_old": 0}, "11 two phone calls stored")
+r = us.record_phone_calls(con, [pc(1, NOW - 60), pc(3, NOW - 10)], NOW)
+ok(r == {"added": 1, "already": 1, "too_old": 0}, "11 a resend counts once")
+r = us.record_phone_calls(con, [pc(4, NOW - 40 * 86400)], NOW)
+ok(r["too_old"] == 1 and r["added"] == 0, "11 a call older than a month is skipped")
+us.record_call(con, F, NOW - 20, input_tokens=400, output_tokens=80)
+calls = us.load_calls(con, NOW - 3600)
+ok(len(calls) == 4 and [c["from"] for c in calls].count("phone") == 3 and calls == sorted(calls, key=lambda c: c["at"]),
+   "11 load_calls gives tablet and phone calls in time order")
+v = us.build([], calls, NOW, days=2)
+day = v["models"][F][-1]
+ok(day["requests"] == 4 and day["phone_requests"] == 3 and day["tokens_in"] == 1900 and day["tokens_out"] == 440,
+   "11 the day's bar counts phone calls, with input and output tokens")
+for bad, name in ((pc(5, NOW, inp=-1), "negative tokens"), (pc(5, NOW, inp=True), "bool tokens"),
+                  (pc(5, NOW + 3600), "future"), (pc(5, NOW, kind="chat"), "unknown kind"),
+                  (pc(5, NOW, model="gemini 3.8 flash!"), "bad model"), ({**pc(5, NOW), "text": "hi"}, "words"),
+                  ({**pc(5, NOW), "id": ""}, "empty id"), (pc(5, NOW, out=3_000_000), "too many tokens")):
+    raises(lambda b=bad: us.record_phone_calls(con, [pc(6, NOW - 5), b], NOW), "bad_value", "11 refused: " + name)
+ok(con.execute("select count(*) from phone_calls").fetchone()[0] == 3, "11 a refused batch saves nothing")
+raises(lambda: us.record_phone_calls(con, [], NOW), "bad_value", "11 empty batch refused")
+raises(lambda: us.record_phone_calls(con, [pc(i, NOW - i) for i in range(201)], NOW), "bad_value", "11 over 200 refused")
+cols = [r[1] for r in con.execute("pragma table_info(phone_calls)")]
+ok(cols == ["call_id", "at", "model", "input_tokens", "output_tokens", "kind"], "11 phone_calls holds no words")
 
 # 10. Source: reads only, no network, no sleep, no sign-in, no fear words.
 for f in ("rivia_usage.py", "rivia_model_limits.py"):

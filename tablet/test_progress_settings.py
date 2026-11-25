@@ -529,8 +529,8 @@ import rivia_model_limits as ml2  # noqa: E402
 now_ = time.time()
 st, r = http(BASE, "/app/progress/usage", APP)
 ok(st == 200 and r["ok"] and len(r["days"]) == 14 and set(r["kinds"]) == set(goals.DEFAULT_LIMITS)
-   and r["gauges"]["gemini-4-neon"]["worst"] == "not_set" and r["mode"] == "measure" and r["seen"] == ["tablet"],
-   "empty: 14 days, every kind, every model not set, measuring, tablet-only note")
+   and r["gauges"]["gemini-4-neon"]["worst"] == "not_set" and r["mode"] == "measure" and r["seen"] == ["tablet", "phone"],
+   "empty: 14 days, every kind, every model not set, measuring, tablet and phone counted")
 ok(r["rpd_resets_at"] == int(ml2.next_pacific_midnight(time.time())) or
    abs(r["rpd_resets_at"] - ml2.next_pacific_midnight(time.time())) < 2, "says when RPD starts over")
 ok(r["goal_limits"]["debug"]["tokens"] == 150_000 and r["hard_ceiling"]["tokens"] == 1_000_000,
@@ -556,8 +556,22 @@ ok(st == 200 and r["models"]["gemini-4-hydrogen"][-1]["requests"] == 9
    "9 calls a minute against your 10 RPM reads near; your new 70,000 token line is what the graph draws")
 ok(http(BASE, "/app/progress/usage?days=99", APP)[0] == 400 and http(BASE, "/app/progress/usage?days=x", APP)[0] == 400,
    "days outside 1 to 31: 400")
-ok(http(BASE, "/app/progress/usage", APP, {"x": 1})[0] == 405 and http(BASE, "/app/progress/usage")[0] == 401
-   and http(BASE, "/app/progress/usage", ADMIN)[0] == 403, "read-only (POST 405), app token only (401, 403)")
+ok(http(BASE, "/app/progress/usage", APP, {"x": 1})[0] == 400 and http(BASE, "/app/progress/usage")[0] == 401
+   and http(BASE, "/app/progress/usage", ADMIN)[0] == 403, "POST needs {calls}, app token only (401, 403)")
+ok(http(BASE, "/app/progress/usage", APP, method="DELETE")[0] == 405, "usage DELETE: 405")
+pcall_ = {"id": "r-ab12-1", "at": time.time() - 3, "model": "gemini-3.8-flash", "in": 700, "out": 150, "kind": "rivia_text"}
+st, r = http(BASE, "/app/progress/usage", APP, {"calls": [pcall_]})
+ok(st == 200 and r == {"ok": True, "added": 1, "already": 0, "too_old": 0}, "POST: the phone's call is stored")
+st, r = http(BASE, "/app/progress/usage", APP, {"calls": [pcall_]})
+ok(st == 200 and r["already"] == 1 and r["added"] == 0, "POST again: counted once")
+st, r = http(BASE, "/app/progress/usage", APP, {"calls": [dict(pcall_, id="r-ab12-2", text="hello")]})
+ok(st == 400 and r["code"] == "bad_value", "POST with words in it: refused")
+ok(http(BASE, "/app/progress/usage", APP, raw=b"x" * 70000, method="POST")[0] == 413, "usage POST too big: 413")
+ok(http(BASE, "/app/progress/usage", ADMIN, {"calls": [pcall_]})[0] == 403, "admin token can't report phone calls")
+st, r = http(BASE, "/app/progress/usage?days=1", APP)
+ok(st == 200 and r["models"]["gemini-3.8-flash"][-1]["phone_requests"] == 1
+   and r["gauges"]["gemini-3.8-flash"]["worst"] == "not_set",
+   "the phone's call shows on today's Flash bar; Flash has no limit set")
 st, r = http(BASE, "/app/progress", APP, {"set": {"models.hydrogen.rpm": None, "limits.plan_run.cost_usd": 0.25}})
 ok(st == 200 and ps.model_limits()["hydrogen"]["rpm"] is None and ps.goal_limits("plan_run")["cost_usd"] == 0.25,
    "over HTTP a blank (null) clears a model limit, and a money cap can be set")
