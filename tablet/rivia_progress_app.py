@@ -7,7 +7,10 @@
 #                        or {"reset": "all" | "piece:5.2" | "piece:5.4" | "piece:5.5" | "piece:models" |
 #                        "piece:goals" | path}. Goal limits (time, tokens, calls, money, tries) and each model's
 #                        RPM/TPM/RPD are settings here like any other; 5.5 reads them and keeps no copy.
-#   GET  /app/progress/usage?days=14   read-only: what section 5.5's graphs and gauges draw. 5.5's usage_view()
+#   POST /app/progress/usage  {"calls": [{"id", "at", "model", "in", "out", "kind"}, ...]}  the phone app reports its
+#                        own Gemini calls (token counts only, never words) so Layer 5 counts them too (Nov 25,
+#                        Jordan: "I want the flash usage tracked"). Same id twice counts once. Writes phone_calls only.
+#   GET  /app/progress/usage?days=14   what section 5.5's graphs and gauges draw. 5.5's usage_view()
 #                        (tokens per goal per day, requests and peaks per model per day), plus each model's
 #                        RPM/TPM/RPD right now against Jordan's numbers (5.5's rivia_model_limits.usage()), when
 #                        RPD resets, and the limits in use for the limit lines. Never writes anything.
@@ -33,6 +36,7 @@ USAGE_PATH = "/app/progress/usage"
 USAGE_DAYS = 14
 DOOR = "app_button"
 MAX_BODY = 8192  # a full set of changes is under 2 KB
+MAX_USAGE_BODY = 65536  # 200 calls at about 150 bytes each
 
 
 def _err(status, code, msg):
@@ -104,9 +108,44 @@ def _days(request):
     return int(raw)
 
 
+def phone_reply(body, now=None, con=None):
+    """One POST of phone calls, already parsed. Returns (status, reply)."""
+    import time
+
+    import rivia_usage as us
+    if not isinstance(body, dict) or set(body) != {"calls"}:
+        return 400, {"ok": False, "code": "bad_request", "error": "send {\"calls\": [...]} and nothing else"}
+    now = time.time() if now is None else now
+    own = con is None
+    if own:
+        import rivia_normal as normal
+        con = normal.db_open()
+    try:
+        r = us.record_phone_calls(con, body["calls"], now)
+    except us.UsageError as e:
+        return 400, {"ok": False, "code": e.code, "error": str(e)}
+    finally:
+        if own:
+            con.close()
+    return 200, {"ok": True, **r}
+
+
 async def usage(request: Request):
+    if request.method == "POST":
+        try:
+            raw = await request.body()
+            if len(raw) > MAX_USAGE_BODY:
+                return _err(413, "too_big", "body is over %d bytes" % MAX_USAGE_BODY)
+            try:
+                body = json.loads(raw or b"null")
+            except ValueError:
+                return _err(400, "bad_json", "body must be JSON")
+            status, reply = phone_reply(body)
+            return JSONResponse(reply, status_code=status)
+        except Exception as e:  # noqa: BLE001
+            return _err(500, "internal", type(e).__name__)
     if request.method not in ("GET", "HEAD"):
-        return _err(405, "method_not_allowed", "this is read-only; use GET")
+        return _err(405, "method_not_allowed", "use GET to read, POST to report phone calls")
     days = _days(request)
     if days is None:
         return _err(400, "bad_value", "days must be a whole number")
