@@ -1,13 +1,16 @@
 # rivia_inject.py: the injection line for Rivia's emotion state (emotion spec, Step 1.6).
 #
-# Turns the current V, A, D point into words, never raw numbers, as the spec's injection format says:
-#   "mildly angry, dry style, intensity 2"
-# The word and the intensity come from rivia_emotion.label() (1.4); this file only phrases them.
+# Turns the current V, A, D point into words, never raw numbers:
+#   "mood: annoyance, intensity 2 of 4"
+# The label and the intensity come from rivia_emotion.label() (1.4); this file only phrases them. The word is
+# label()'s name, the same one GET /app/emotion shows on the dial. How she should sound (style) is Step 8's
+# job, so the line carries no style.
 #
-# SHADOW MODE (default on): the line is built and logged every time, but for_gemini() returns ""
-# so nothing reaches Gemini and her replies stay exactly the same (spec: "Done when ... her replies
-# stay exactly the same"). Turning SHADOW off is a one-line change and a deliberate step after the
-# 2-3 week shadow run; it is not something any tool or door can do at runtime.
+# LIVE (Jordan, Nov 26: "Send #4 to rivia-server", Layer 1 live). SHADOW is False, so for_gemini() returns the
+# line, and the app fetches it from GET /app/emotion/line (rivia_emotion_app) before each Gemini turn. Setting
+# SHADOW back to True is the one-line way back to shadow: the line is then still built and logged, but "" goes
+# out. No tool or door can change SHADOW at runtime. Layer 1's switch (l1 in rivia_toggles) also silences it:
+# with l1 off, for_gemini() returns "".
 #
 # Rules:
 #   - The only function a Gemini-feeding caller may use is for_gemini(). build_line() is for logs,
@@ -15,12 +18,14 @@
 #   - for_gemini() never raises: any failure (no DB, bad row, log write fails) returns "", because
 #     emotion colors how she speaks, never how she works.
 #   - Reads only. Never changes the state; the one writer stays rivia_emotion._apply().
-#   - The log (inject_log in emotion.db) is separate from the change log (1.7, not built here).
+#   - The log (inject_log in emotion.db) is separate from the change log (1.7). Each for_gemini() call writes
+#     one row: when, her numbers and label, the line that went out, and the shadow flag. Never any of Jordan's
+#     words: nothing here ever sees them.
 import rivia_emotion as emo
 import rivia_store as store
 import rivia_time as rt
 
-SHADOW = True  # True: build and log only. False: for_gemini() returns the line. Edit here only.
+SHADOW = False  # False: for_gemini() returns the line (live). True: build and log only. Edit here only.
 
 # Step 2.3: which layer the label and this line read. Step 2 has three layers (emotion, mood, baseline);
 # the line reads the EMOTION layer with decay applied, i.e. whatever rivia_emotion.read() returns. Emotion
@@ -41,74 +46,58 @@ create table if not exists inject_log(
 
 # Neutral injects nothing: an empty line means "no emotional colouring", so Gemini gets no hint at all.
 NEUTRAL_LINE = ""
+LINE_FORMAT = "mood: %s, intensity %d of 4"
+LEVEL_MAX = 4
 
-# label() intensity word -> (adverb in the line, the spec's "intensity N").
+# label() intensity word -> the line's "intensity N of 4".
 INTENSITY = {
-    "faint": ("faintly", 1),
-    "mild": ("mildly", 2),
-    "moderate": ("moderately", 3),
-    "strong": ("strongly", 4),
+    "faint": 1,
+    "mild": 2,
+    "moderate": 3,
+    "strong": 4,
 }
-
-# Reference-point name -> the adjective in the line. Plain words on purpose: a softer word for mild
-# anger ("irritated", as in the spec's example) is Step 8's job, once there's data on how it reads.
-ADJECTIVE = {
-    "joy": "happy",
-    "anger": "angry",
-    "sadness": "sad",
-    "surprise": "surprised",
-    "annoyance": "annoyed",
-    "contentment": "content",
-    "relief": "relieved",
-    "calm": "calm",
-    "focused": "focused",
-    "distressed": "distressed",  # in place of fear (Jordan, Nov 22: no fear; distressed is fine)
-    "worried": "worried",        # Step 4.5 (Jordan, Nov 22: "Yes add worried"); plain style
-}
-
-# PLACEHOLDERS for Step 8's mood -> style map; not tuned, kept minimal. Anything unlisted is "plain".
-# From the spec's starting map: irritated -> dry, good mood -> playful, focused -> crisp.
-STYLE = {
-    "anger": "dry",
-    "annoyance": "dry",   # spec: irritated -> dry
-    "joy": "playful",
-    "contentment": "playful",
-    "focused": "crisp",
-}
-DEFAULT_STYLE = "plain"
 
 
 def build_line(v, a, d, *, rest=None):
-    """The words for a V, A, D point: {"line", "name", "intensity", "level", "style"}.
+    """The words for a V, A, D point: {"line", "name", "intensity", "level"}.
     Near 0, or near rest (her baseline, 2.3), the line is NEUTRAL_LINE and level is 0. Pure; reads nothing,
     writes nothing. Never feed the result to Gemini; for_gemini() is the only door for that."""
     lab = emo.label(v, a, d, rest=rest)
     name = lab["name"]
     if name == "neutral":
-        return {"line": NEUTRAL_LINE, "name": "neutral", "intensity": "neutral", "level": 0, "style": DEFAULT_STYLE}
-    adverb, level = INTENSITY[lab["intensity"]]
-    style = STYLE.get(name, DEFAULT_STYLE)
-    line = "%s %s, %s style, intensity %d" % (adverb, ADJECTIVE[name], style, level)
-    return {"line": line, "name": name, "intensity": lab["intensity"], "level": level, "style": style}
+        return {"line": NEUTRAL_LINE, "name": "neutral", "intensity": "neutral", "level": 0}
+    level = INTENSITY[lab["intensity"]]
+    return {"line": LINE_FORMAT % (name, level), "name": name, "intensity": lab["intensity"], "level": level}
 
 
-def _log(built, state, shadow):
+def _log(built, state, shadow, line=None):
+    """One inject_log row. `line` is what went out (for_gemini); None logs the built line (current())."""
     con = store.connect("emotion", LOG_SCHEMA)
     try:
         con.execute("insert into inject_log(at, v, a, d, name, intensity, line, shadow) values(?,?,?,?,?,?,?,?)",
-                    (rt.iso(rt.now_s()), state["v"], state["a"], state["d"],
-                     built["name"], built["intensity"], built["line"], 1 if shadow else 0))
+                    (rt.iso(rt.now_s()), state["v"], state["a"], state["d"], built["name"], built["intensity"],
+                     built["line"] if line is None else line, 1 if shadow else 0))
     finally:
         con.close()
+
+
+def _build(con=None):
+    layers = emo.read_all(con)  # decayed (2.2); the label names LABEL_LAYER, measured against REST_LAYER (2.3)
+    state, base = layers[LABEL_LAYER], layers[REST_LAYER]
+    return state, build_line(state["v"], state["a"], state["d"], rest=(base["v"], base["a"], base["d"]))
+
+
+def layer_on():
+    """Layer 1's switch (l1). Unreadable switches fall back to the code's defaults (on), as rivia_toggles does."""
+    import rivia_toggles as toggles
+    return toggles.runs("l1")
 
 
 def current(con=None):
     """Build the line for her current state (the decayed emotion layer) and log it. Returns build_line()'s
     dict plus "shadow" and "layer".
     For logs and the admin view; not for prompts. May raise (unlike for_gemini)."""
-    layers = emo.read_all(con)  # decayed (2.2); the label names LABEL_LAYER, measured against REST_LAYER (2.3)
-    state, base = layers[LABEL_LAYER], layers[REST_LAYER]
-    built = build_line(state["v"], state["a"], state["d"], rest=(base["v"], base["a"], base["d"]))
+    state, built = _build(con)
     built["shadow"] = SHADOW
     built["layer"] = LABEL_LAYER
     _log(built, state, SHADOW)
@@ -116,13 +105,16 @@ def current(con=None):
 
 
 def for_gemini(con=None):
-    """The one call a prompt builder may make. Builds and logs the line every time; returns it only
-    when SHADOW is off. In shadow mode, and on any error, returns "" (inject nothing)."""
+    """The one call a prompt builder may make. Builds the line and logs one row every time; returns it only
+    when SHADOW is off and Layer 1 is on. Neutral, shadow, Layer 1 off, and any error all return "" (inject
+    nothing). The logged line is what was returned."""
     try:
-        built = current(con)
+        state, built = _build(con)
+        line = built["line"] if (not SHADOW and layer_on()) else ""
+        _log(built, state, SHADOW, line)
+        return line
     except Exception:
         return ""
-    return "" if SHADOW else built["line"]
 
 
 def recent(n=20):

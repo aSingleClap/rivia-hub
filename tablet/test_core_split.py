@@ -248,6 +248,30 @@ ok(rt2.get("ok") is True and rt2["data"]["minutes"] == 25, "ride_time round-trip
 ok(hs.get("ok") is True and hs.get("scheduling") == "running", "hub_status round-trips and says scheduling is running")
 ok({"set_setting", "restart_server", "approve_change"} <= admin_names and "set_setting" not in names,
    "set_setting and restart_server stay on /admin/mcp only")
+ADMIN_EXPECTED = {"approve_change", "get_settings", "hub_status", "list_actions", "list_calls", "list_changes",
+                  "list_tools", "reject_change", "restart_server", "set_setting", "undo_change"}
+ok(admin_names == ADMIN_EXPECTED, "tools/list on /admin/mcp returns exactly the expected tools: %s" % sorted(admin_names))
+ok(not [n for n in names | admin_names if "emotion" in n or "line" in n or "inject" in n],
+   "Layer 1 live (Nov 26) added no tool on either door: the line is the route GET /app/emotion/line")
+
+
+def _get(path, token=None):
+    import urllib.error, urllib.request
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path))
+    if token:
+        req.add_header("authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r_:
+            return r_.status, json.loads(r_.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+st_, body_ = _get("/app/emotion/line", APP_TOKEN)
+ok(st_ == 200 and set(body_) == {"ok", "line", "shadow"} and body_["shadow"] is False,
+   "the real server serves GET /app/emotion/line on the app door: %s" % json.dumps(body_))
+ok(_get("/app/emotion/line", ADMIN_TOKEN)[0] == 403 and _get("/app/emotion/line")[0] == 401,
+   "and only to the app token (admin 403, none 401)")
 calls = tools.list_call_rows(limit=50)
 ok({c_["tool"] for c_ in calls} >= {"app_places", "ride_time"} and all(c_["door"] == "app" for c_ in calls),
    "the calls land in core.db's call log")
