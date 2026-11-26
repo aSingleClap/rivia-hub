@@ -52,7 +52,8 @@ _p("l1.3", 1, "1.3", "1.3 Reference points", needs=[("l1", H)])
 _p("l1.4", 1, "1.4", "1.4 Labels", needs=[("l1", H)])
 _p("p1.5", 1, "1.5", "1.5 Manual mood dial", "phone", needs=[("l1", H)], where="phone")
 _p("l1.6", 1, "1.6", "1.6 Mood line for Gemini", needs=[("l1", H)],
-   why="A hand edit in the code by design (shadow); not switched from the app.")
+   why="Live: the app gets it from GET /app/emotion/line. Follows Layer 1's switch; going back to shadow is "
+       "a hand edit in the code, not a switch in the app.")
 _p("l1.7", 1, "1.7", "1.7 Change log", "always_on", why=GUARD)
 _p("l1.8", 1, "1.8", "1.8 Acceptance checks", needs=[("l1", H)])
 

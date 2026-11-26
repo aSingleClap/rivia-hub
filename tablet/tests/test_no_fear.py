@@ -50,8 +50,8 @@ def with_points(points, fn):
 
 print("1. the word lists")
 ok("fear" not in pts and not any(said(n) for n in pts), "no reference point is named fear, afraid, scared or the like")
-ok(not any(said(w) for w in inj.ADJECTIVE.values()), "no word in the injection line's list says fear")
-ok(set(inj.ADJECTIVE) == set(pts), "every point still has a word (distressed -> %r)" % inj.ADJECTIVE["distressed"])
+ok(not any(said(w) for w in pts), "no label the injection line can say is fear (it says label names since Nov 26)")
+ok(inj.build_line(*pts["distressed"])["line"].startswith("mood: distressed, "), "distressed is said as distressed")
 ok("annoyance" in pts and "distressed" in pts, "the two words Jordan allowed are both there: annoyed and distressed")
 ok(pts["distressed"] == FEAR, "distressed sits where fear was (R&M's afraid numbers), so nothing else has to move")
 ok("distressed" in emo.HAND_PICKED and "distressed" not in emo.RM1977, "filed as hand-placed, not as an R&M term")
@@ -65,7 +65,7 @@ rests = [(0, 0, 0), (0.1, -0.1, 0.05), (-0.2, 0.0, 0.1)]
 ok(not any(said(emo.label(*p, rest=r)["name"]) for p in GRID[::7] for r in rests), "the same with a baseline as rest")
 lines = {inj.build_line(*p)["line"] for p in GRID}
 ok(not any(said(line) for line in lines), "no injection line says fear, afraid or scared (%d lines)" % len(lines))
-ok(inj.build_line(*FEAR)["line"] == "strongly distressed, plain style, intensity 4",
+ok(inj.build_line(*FEAR)["line"] == "mood: distressed, intensity 4 of 4",
    "fear's old spot now makes: %r" % inj.build_line(*FEAR)["line"])
 
 print("3. every state that read fear now reads distressed, and nothing else moved")
@@ -85,7 +85,7 @@ steps = [emo.label(*(s * x for x in FEAR)) for s in (0.1, 0.25, 0.4, 0.7, 1.0)]
 ok([r["intensity"] for r in steps] == ["neutral", "faint", "mild", "moderate", "strong"]
    and all(r["name"] == "distressed" for r in steps[1:]),
    "distressed grows faint, mild, moderate, strong as she moves out: %s" % ", ".join(r["intensity"] for r in steps))
-ok(inj.STYLE.get("distressed", inj.DEFAULT_STYLE) == "plain", "distressed talks plain (no style set; review question)")
+ok("style" not in inj.build_line(*FEAR)["line"], "the line carries no style (Step 8 owns style)")
 
 print("5. with 4.5's worried point added (the 4.9 merge)")
 W = {**pts, "worried": WORRIED}

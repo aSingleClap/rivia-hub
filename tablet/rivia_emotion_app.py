@@ -3,6 +3,9 @@
 #
 #   GET  /app/emotion   the state plus its current label (reads only)
 #   POST /app/emotion   {"set": {"v", "a", "d"}} or {"nudge": {"dv", "da", "dd"}}, optional "note"
+#   GET  /app/emotion/line   the injection line (Step 1.6, live since Nov 26) for the app to put in Gemini's
+#                       prompt: {"ok": true, "line": "mood: annoyance, intensity 2 of 4", "shadow": false}. "" when
+#                       she's neutral, Layer 1 is off, or anything fails. Each call logs one inject_log row.
 #
 # 2.4, what the dial moves: emotion freely; mood and baseline only while the lock is open (10 minutes
 # from an unlock press), and every mood or baseline change carries a tag, logged in change_log.tag and
@@ -34,6 +37,7 @@ from starlette.routing import Route
 import rivia_emotion as emo
 
 PATH = "/app/emotion"
+LINE_PATH = "/app/emotion/line"
 DOOR = "app_button"
 CAUSE = "manual"
 MAX_BODY = 2048  # a set or nudge is under 200 bytes
@@ -253,7 +257,23 @@ async def emotion(request: Request):
         return _err(500, "internal", type(e).__name__)
 
 
+def line_reply():
+    """GET /app/emotion/line's body. for_gemini() never raises and logs one row per call."""
+    import rivia_inject as inject
+    return {"ok": True, "line": inject.for_gemini(), "shadow": bool(inject.SHADOW)}
+
+
+async def line(request: Request):
+    if request.method not in ("GET", "HEAD"):
+        return _err(405, "method_not_allowed", "this is read-only; use GET")
+    try:
+        return JSONResponse(line_reply())
+    except Exception as e:  # noqa: BLE001
+        return _err(500, "internal", type(e).__name__)
+
+
 def routes():
     """The routes rivia_auth.build_app puts ahead of the /app mount (rivia_auth.patch)."""
     # Every method lands here (405 for the rest) so none falls through to the /app MCP mount.
-    return [Route(PATH, emotion, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])]
+    methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    return [Route(PATH, emotion, methods=methods), Route(LINE_PATH, line, methods=methods)]

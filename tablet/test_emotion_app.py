@@ -187,6 +187,56 @@ for path in ("/emotion", "/app/login", "/health/emotion"):
     except SystemExit:
         refused = True
     ok(refused, "build_app refuses an extra route at %s" % path)
+
+# ── 2b. GET /app/emotion/line: the injection line for the app (Layer 1 live, Nov 26) ──
+print("2b. GET /app/emotion/line")
+import rivia_inject as inj  # noqa: E402
+import rivia_toggles as tg  # noqa: E402
+
+
+def inject_rows():
+    import sqlite3
+    c = sqlite3.connect(os.path.join(os.environ["RIVIA_DIR"], "emotion.db"))
+    try:
+        return c.execute("select count(*) from inject_log").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        c.close()
+
+
+ok(http(BASE, "/app/emotion/line")[0] == 401, "line, no token: 401")
+ok(http(BASE, "/app/emotion/line", "x.y.z")[0] == 401, "line, bad token: 401")
+ok(http(BASE, "/app/emotion/line", ADMIN)[0] == 403, "line, admin token: 403 (wrong door)")
+ok(all(http(BASE, "/app/emotion/line", APP, method=m, raw=b"{}")[0] == 405 for m in ("POST", "PUT", "DELETE")),
+   "line is read-only: POST, PUT, DELETE 405, none falls through to the MCP mount")
+emo.write(0, 0, 0, cause="line test", door="code")
+n0 = inject_rows()
+st, r = http(BASE, "/app/emotion/line", APP)
+ok(st == 200 and r == {"ok": True, "line": "", "shadow": False}, "neutral: %s" % json.dumps(r))
+ok(set(r) == {"ok", "line", "shadow"} and isinstance(r["ok"], bool) and isinstance(r["line"], str)
+   and isinstance(r["shadow"], bool), "shape: ok (bool), line (str), shadow (bool), nothing else")
+ok(inject_rows() == n0 + 1, "the call wrote one inject_log row")
+emo.write(*(0.5 * x for x in emo.REFERENCE_POINTS["annoyance"]), cause="line test", door="code")
+L_ = emo.read_all()
+lab = emo.label(L_["emotion"]["v"], L_["emotion"]["a"], L_["emotion"]["d"],
+                rest=(L_["baseline"]["v"], L_["baseline"]["a"], L_["baseline"]["d"]))
+st, r = http(BASE, "/app/emotion/line", APP)
+want = "mood: %s, intensity %d of 4" % (lab["name"], inj.INTENSITY[lab["intensity"]])
+ok(st == 200 and r["line"] == want and r["shadow"] is False and lab["name"] != "neutral",
+   "a non-neutral mood: %r" % r["line"])
+ok(http(BASE, "/app/emotion", APP)[1]["state"]["label"] == lab["name"], "the line names what the app's dial shows")
+ok(inject_rows() == n0 + 2 and inj.recent(1)[0]["line"] == want and inj.recent(1)[0]["shadow"] is False,
+   "and logged that line, marked live")
+tg.set_switch("l1", False, door="app_button", note="test")
+try:
+    st, r = http(BASE, "/app/emotion/line", APP)
+    ok(st == 200 and r == {"ok": True, "line": "", "shadow": False}, "Layer 1 off: the line is empty")
+    ok(inject_rows() == n0 + 3 and inj.recent(1)[0]["line"] == "", "and the row logs the empty line that went out")
+finally:
+    tg.set_switch("l1", True, door="app_button", note="test")
+ok(http(BASE, "/app/emotion/line", APP)[1]["line"] == want, "Layer 1 back on: the line again")
+emo.write(0, 0, 0, cause="line test", door="code")
 server.should_exit = True
 
 # ── 3. the live tool list (tablet) ──
@@ -219,6 +269,12 @@ if Client is not None:
     ok(not [n for n in admin_tools if "emotion" in n], "no emotion tool on the admin door either")
     st, r = http(BASE, "/app/emotion", APP)
     ok(st == 200 and r.get("ok"), "the real server answers GET /app/emotion with the app token")
+    st, r = http(BASE, "/app/emotion/line", APP)
+    ok(st == 200 and set(r) == {"ok", "line", "shadow"}, "and GET /app/emotion/line")
+    ok(http(BASE, "/app/emotion/line", ADMIN)[0] == 403 and http(BASE, "/app/emotion/line")[0] == 401,
+       "the real server's line route: admin 403, no token 401")
+    ok(not [n for n in list(app_tools) + list(admin_tools) if "line" in n or "inject" in n],
+       "no line or inject tool on either door")
     server.should_exit = True
 
 print("PASS" if not failed else "FAILED: %d" % failed)

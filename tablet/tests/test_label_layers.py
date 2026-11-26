@@ -120,15 +120,16 @@ print("     sadness onto a happy mood:  " + " -> ".join(s2j))
 ok(a2c[0].endswith("anger") and any(w.endswith("contentment") for w in a2c), "anger fades into the content mood")
 ok("neutral" in s2j[1:-1], "sadness onto joy passes briefly through neutral")
 
-print("5. shadow mode holds through a fade")
-leaked = []
+print("5. live (Nov 26): what goes out follows the fade")
+off = []
 for e, m in ((P["anger"], sc("contentment", 0.5)), (P["joy"], Z), (P["distressed"], sc("sadness", 0.5))):
     t0 = setup(e, m, Z)
     for mins in TIMES:
         after(t0, mins)
-        if inj.for_gemini() != "":
-            leaked.append((e, mins))
-ok(inj.SHADOW is True and not leaked, "for_gemini() returned \"\" at every point of three fades")
+        out = inj.for_gemini()
+        if out != inj.current()["line"] or (out and not out.startswith("mood: ")):
+            off.append((e, mins, out))
+ok(inj.SHADOW is False and not off, "for_gemini() handed out the current line at every point of three fades")
 
 print("6. her normal counts as neutral (Jordan, Nov 21)")
 for s in (0.25, 0.4, 0.8):
