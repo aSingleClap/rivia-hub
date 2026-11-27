@@ -311,7 +311,7 @@ NOTES = {
             "Her questions are only tracked once the app copies her replies to the tablet."],
     "3.2": ["Cursing at her and a thumbs down start at a third of the biggest event. Rough words count as a glitch, "
             "never an attack, and she never brings them up."],
-    "3.3": ["Shadow only: these move a would-be copy of her mood kept on the tablet. Her real mood doesn't move."],
+    "3.3": ["Live: these move her real mood. One message moves each mood number at most this much."],
     "3.6": ["Shadow only: the app copies her finished reply after you've seen it. Your chat never shows the reworded "
             "one and never waits for it. Her replies are kept, plain and reworded, with no auto-delete."],
     "3.7": ["She can feel stronger inside than she shows. No fear words, no cursing unless banter allows it (Layer 8), "

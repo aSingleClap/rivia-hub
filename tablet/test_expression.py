@@ -16,6 +16,7 @@ os.environ.pop("GEMINI_API_KEY", None)
 sys.path.insert(0, HERE)
 import baseline  # noqa: E402
 import rivia_appraisal as ap  # noqa: E402
+ap.SHADOW = True  # these checks set her mood up on the practice copy (rewording, 3.6, is still shadow)
 import rivia_expression as ex  # noqa: E402
 import rivia_reading as rd  # noqa: E402
 import rivia_style as st  # noqa: E402

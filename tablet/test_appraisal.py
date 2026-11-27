@@ -1,5 +1,5 @@
 """Emotion spec Step 3.1 to 3.5: events, preset pushes, the per-message limit, the message read and caution flags.
-Shadow only. Fake Gemini, throwaway folders; no network, no key kept.
+Shadow path (kept for going back; live is test_appraisal_live.py). Fake Gemini, throwaway folders; no network, no key kept.
   1. the event menu: no event points toward fear; the biggest equals the limit; cursing and thumbs down are a third
   2. Flash's events: only menu names and strengths 1-3 are taken, at most 3, never numbers
   3. pushes: strength scales them, one message is held to the limit, her slower mood takes 10%
@@ -20,6 +20,7 @@ os.makedirs(os.path.join(TMP, "rivia"), exist_ok=True)
 sys.path.insert(0, HERE)
 import baseline  # noqa: E402
 import rivia_appraisal as ap  # noqa: E402
+ap.SHADOW = True  # this file checks the shadow path (kept for going back); test_appraisal_live.py checks live
 import rivia_reading as rd  # noqa: E402
 import rivia_reading_flash as fl  # noqa: E402
 import rivia_satisfaction as sat  # noqa: E402
@@ -135,7 +136,11 @@ ok(ap.live_rows()[0]["emotion"]["v"] == 0.0 and not os.path.exists(emo_path),
 import ast  # noqa: E402
 calls = {n.func.attr for n in ast.walk(ast.parse(open(os.path.join(HERE, "rivia_appraisal.py")).read()))
          if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-ok(not calls & {"nudge", "write", "_apply"}, "it never calls nudge(), write() or _apply() on her real mood")
+src = open(os.path.join(HERE, "rivia_appraisal.py")).read()
+shadow_src = src.replace(src[src.index("def _apply_live("):src.index("def _record(")], "")
+calls = {n.func.attr for n in ast.walk(ast.parse(shadow_src)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+ok(not calls & {"nudge", "write", "_apply"}, "in shadow it never calls nudge(), write() or _apply() on her real mood "
+                                             "(only _apply_live does)")
 
 print("5. from Step 7's Flash read")
 c = db()

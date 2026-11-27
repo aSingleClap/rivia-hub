@@ -1,6 +1,10 @@
 # rivia_appraisal.py: what just happened, and how far it would move her (emotion spec, Step 3.1 to 3.5).
-# DRAFT, Nov 24, not installed. Shadow only: every push here lands on a would-be copy of her mood kept in body.db.
-# Her real mood (emotion.db) is only ever read, never written, and nothing here reaches her replies.
+# Nov 26 (Jordan, "Draft it"): LIVE. Each push now moves her real mood through rivia_emotion.nudge(door="code"): the
+# fast (emotion) layer takes the push, the slow (mood) layer its 10% share. Layer 1's switch off stops every push (as
+# it stops the dial); Layer 2's switch off stops the mood share only. The would-be copy in body.db is kept as a mirror
+# of her real mood after each push, so going back to shadow (SHADOW = True, a code edit) starts from where she is.
+# Still shadow: 3.5 caution flags (CAUTION_SHADOW) and 3.6 rewording (rivia_expression.SHADOW).
+# Before Nov 26 (shadow): every push landed on the would-be copy only; her real mood was only ever read.
 #
 # Jordan's decisions (Nov 24, relayed):
 #   "Split": the message read and the mood push run on the tablet, inside the Flash call Step 7 already makes for each
@@ -27,8 +31,8 @@
 #   3.5 caution flags     Step 4's dials (double-check, pause, blind spots) and Step 6's area cautions, gathered into the
 #                         one line an answering model would get. Logged only; for_answer() returns "" in shadow.
 #
-# Writes body.db only (tables appraisal_*). Never emotion.db (refused by _guard), never core.db (read-only), never a
-# sign-in file. Never an MCP tool, never on a door Gemini can reach. His message text is never seen here: only the
+# Writes body.db (tables appraisal_*) and, live, her real mood only through rivia_emotion.nudge(door="code"). Never
+# emotion.db directly (refused by _guard), never core.db (read-only), never a sign-in file. Never an MCP tool, never on a door Gemini can reach. His message text is never seen here: only the
 # event names Flash returned.
 import json
 import math
@@ -39,7 +43,9 @@ import time
 
 import rivia_reading as reading
 
-SHADOW = True  # True: would-be mood and logs only. Going live means pushes through rivia_emotion.nudge(door="code").
+SHADOW = False  # False (Nov 26): pushes move her real mood via rivia_emotion.nudge(door="code"). True: would-be copy
+                #   and logs only. No tool, door or switch changes this at runtime; back to shadow is a code edit.
+CAUTION_SHADOW = True  # 3.5: for_answer() stays "" until this is a code edit too (nothing calls it yet)
 
 # ---------- starting numbers (all adjustable in the Layer 3 card, rivia_appraisal_settings) ----------
 LIMIT = 0.30            # 3.3 most any one message (or tick) can move each mood number on the fast layer
@@ -296,6 +302,8 @@ def apply(con, events, now, t, message_id=None, live=None, cause="message"):
              message_id)
     pushes = [push_for(ev["name"], ev["strength"], t) for ev in counted]
     capped, raw, limited = combine(pushes, t)
+    if not SHADOW:
+        return _apply_live(con, counted, capped, raw, limited, now, t, message_id, cause)
     before = outward(state, t)
     new = {layer: dict(state[layer]) for layer in state}
     for i, k in enumerate("vad"):
@@ -307,6 +315,59 @@ def apply(con, events, now, t, message_id=None, live=None, cause="message"):
            "push": list(capped), "raw": list(raw), "limited": limited, "before": before["words"],
            "after": after["words"], "shown_capped": after["capped"],
            "emotion": [new["emotion"][k] for k in "vad"], "mood": [new["mood"][k] for k in "vad"], "shadow": SHADOW}
+    _log(con, "push", now, row, message_id)
+    return row
+
+
+def _switch_on(name):
+    """A layer switch (rivia_toggles). Unreadable switches fall back to the code's defaults (on), like the mood line does."""
+    try:
+        import rivia_toggles as toggles
+        return toggles.runs(name)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _real_now(now):
+    rows, hand = live_rows()
+    return _decayed(rows, now), hand
+
+
+def _apply_live(con, counted, capped, raw, limited, now, t, message_id, cause):
+    """Live 3.3: the same capped push, on her real mood. Fast layer takes it, slow layer its share. Returns the row
+    logged, or None when Layer 1 is off (nothing moves)."""
+    import rivia_emotion as emo
+    names = [ev["name"] for ev in counted]
+    if not _switch_on("l1"):
+        _log(con, "skip", now, {"why": "Layer 1 is switched off: her mood can't be changed", "events": names,
+                                "shadow": False}, message_id)
+        return None
+    state, _ = _real_now(now)
+    before = outward(state, t)
+    soak = tuple(round(x * t["mood_soak"], 6) for x in capped)
+    note = "Step 3 (%s): %s" % (cause, ", ".join(names))
+    why = "step 3 %s" % cause
+    ids, mood_moved = [], False
+    if any(capped):
+        r = emo.nudge(*capped, cause=why, door=CODE_DOOR, note=note, layer="emotion")
+        ids.append(r.get("log_id"))
+    if any(soak):
+        if _switch_on("l2"):
+            r = emo.nudge(*soak, cause=why, door=CODE_DOOR, note=note, layer="mood")
+            ids.append(r.get("log_id"))
+            mood_moved = True
+        else:
+            _log(con, "not_counted", now, {"name": "mood share", "why": "Layer 2 is switched off: only her fast mood "
+                                                                        "moved"}, message_id)
+    new, hand = _real_now(now)
+    _save(con, new, now)                         # the mirror: going back to shadow starts from her real mood
+    _set_meta(con, "hand_id", "" if hand is None else hand)
+    after = outward(new, t)
+    row = {"cause": cause, "events": [{"name": ev["name"], "strength": ev["strength"]} for ev in counted],
+           "push": list(capped), "raw": list(raw), "limited": limited, "before": before["words"],
+           "after": after["words"], "shown_capped": after["capped"], "mood_moved": mood_moved,
+           "emotion": [new["emotion"][k] for k in "vad"], "mood": [new["mood"][k] for k in "vad"],
+           "log_ids": ids, "shadow": False}
     _log(con, "push", now, row, message_id)
     return row
 
@@ -593,8 +654,8 @@ def caution(con, now, message_id=None):
 
 
 def for_answer(con=None):
-    """The one door the answering model may use for caution flags. "" in shadow and on any error."""
-    if SHADOW:
+    """The one door the answering model may use for caution flags. "" while 3.5 is shadow and on any error."""
+    if CAUTION_SHADOW:
         return ""
     try:
         con, own = reading._open(con)
@@ -618,7 +679,11 @@ def view(con=None, now=None, tune=None, live=None):
     try:
         prepare(con)
         has_state = con.execute("select count(*) from appraisal_state").fetchone()[0] == 2
-        state = would_be(con, now, live)[0] if has_state else None
+        if not SHADOW:     # live: the card's "would-be" is her real mood (they're the same now)
+            rows = (live if live is not None else live_rows())[0]
+            state = _decayed(rows, now)
+        else:
+            state = would_be(con, now, live)[0] if has_state else None
         pushes = log_rows(con, now - 14 * 86400, ("push",))
         skips = log_rows(con, now - 14 * 86400, ("skip", "not_counted"))
         cautions = log_rows(con, now - 14 * 86400, ("caution",))
@@ -652,10 +717,12 @@ def view(con=None, now=None, tune=None, live=None):
 
 def main(argv=None):
     v = view()
-    print("Step 3 (shadow): what just happened, and how far it would move her")
+    print("Step 3 (%s): what just happened, and how far it %s her" % (("shadow", "would move") if SHADOW
+                                                                       else ("live", "moves")))
     if v["note"]:
         print("  " + v["note"])
-    print("  would-be mood: %s" % ((v["would_be"] or {}).get("words") or "not started"))
+    if SHADOW:
+        print("  would-be mood: %s" % ((v["would_be"] or {}).get("words") or "not started"))
     print("  her real mood: %s" % v["real_mood"])
     for n, c in sorted(v["event_counts_14d"].items()):
         print("  last 14 days: %s x%d" % (n, c))
