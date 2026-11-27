@@ -41,9 +41,9 @@ try:  # Step 6 trust and accuracy in shadow mode: same rule, the collector never
 except Exception:  # noqa: BLE001
     trust_shadow = None
 # Step 3: after Step 6, rivia_appraisal turns her tool calls, your thumbs, the plan checks and her unanswered questions
-# into events and moves a would-be copy of her mood in body.db (RIVIA_APPRAISAL_SHADOW=0 switches it off; so does the
-# l3 switch). It reads core.db and emotion.db read-only and writes body.db only.
-try:  # Step 3 code-detected events in shadow mode: same rule, the collector never depends on it
+# into events and (live since Nov 26) nudges her real mood (RIVIA_APPRAISAL_SHADOW=0 switches it off; so does the
+# l3 switch). It reads core.db read-only, writes body.db, and moves her mood only through the emotion module's nudge.
+try:  # Step 3 code-detected events: same rule, the collector never depends on it
     import rivia_appraisal as appraisal
 except Exception:  # noqa: BLE001
     appraisal = None

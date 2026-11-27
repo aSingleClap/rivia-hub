@@ -112,8 +112,8 @@ LONG = ("I checked the gym list again and the closer one is open later on weeken
 
 print("1. GET")
 st_, r = http("/app/appraisal", APP)
-ok(st_ == 200 and r["ok"] and r["shadow"] and r["layer"] == 3 and r["note"].startswith("no events yet"),
-   "nothing yet: says why")
+ok(st_ == 200 and r["ok"] and r["shadow"] is False and r["layer"] == 3 and r["note"].startswith("no events yet"),
+   "nothing yet: says why (and says Step 3 is live)")
 ok([p["piece"] for p in r["layers"][0]["pieces"]] == ["3.1", "3.2", "3.2s", "3.3", "3.6", "3.7"],
    "a small card of values per piece")
 ok(r["rewording"]["shadow"] and r["rewording"]["note"].startswith("no replies yet"), "the rewording part, empty")

@@ -148,8 +148,8 @@ def _body_collector_ended(t):
 
 def appraisal_routes():
     """The app's layer 3 card (/app/appraisal, emotion spec Step 3.9) and the copy of her finished typed replies
-    (/app/appraisal/reply): what just happened and how far it would move her (shadow: a would-be copy of her mood; her
-    real mood never moves here), the shadow rewording with its fact check, and the Layer 3 values. Plain routes behind
+    (/app/appraisal/reply): what just happened and how far it moved her (live since Nov 26: Step 3's pushes move her
+    real mood; these routes only read it), the shadow rewording with its fact check, and the Layer 3 values. Plain routes behind
     the app token, never MCP tools, so Gemini can't see or call them. If they fail to load, the server keeps serving
     without them."""
     try:

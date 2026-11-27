@@ -153,7 +153,8 @@ DEFAULTS = {i: BY_ID[i]["default"] for i in SWITCHES}
 FLASH = "l7.1.flash"           # writes through to Step 7's reading setting facts.flash_on (one value, not two)
 RUNS = ("on", "waiting")       # states in which a piece's work runs
 NOTES = {"l8": "Shadow: logs the style she would use. Her replies don't change until Step 3.",
-         "l3": "Shadow: logs events and a would-be mood; her real mood never moves.",
+         "l3": "Live: your messages, her tool results and your thumbs nudge her real mood (at most 0.3 per "
+               "message). Switch off to stop it; what she felt fades in about 30 minutes.",
          "l3.6": "Shadow: tries the rewording and keeps it for spot-checks; her real reply always stands."}
 
 
