@@ -115,4 +115,11 @@ ok(fl.read("g", "ok", con=con, tune=off) == "off" and len(SENT) == n, "and no ca
 ok("Jordan writes bluntly" in fl.RATER and "short or blunt alone is not upset" in fl.RATER,
    "the rater is told blunt is your normal style")
 
+ok(fl.body("hi")["generation_config"] == {"thinking_level": "low"},
+   "Nov 28: the read asks for low thinking, so it usually lands inside the mood line's wait")
+_t = fl.THINKING
+fl.THINKING = "model_default"
+ok(fl.body("hi")["generation_config"] == {}, "model_default puts the old request back")
+fl.THINKING = _t
+
 print("\n%d checks passed" % COUNT["n"])

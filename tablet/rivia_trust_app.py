@@ -183,12 +183,26 @@ def handle_words(body, con=None, now=None):
 def reading_after(body, status):
     """Step 7: once Step 6 has answered the phone, read the same copy for Step 7 (it may read the calendar), then the
     Flash read, all in the background so the phone never waits. Errors stay there: Step 6's answer is already sent."""
-    if status != 200 or not isinstance(body, dict):
+    if not isinstance(body, dict):
+        return None
+    if status != 200:
+        _line_done(body)   # nothing will read it, so a mood line waiting on it needn't wait (Nov 28)
         return None
     import rivia_toggles as toggles
     if not toggles.runs("l7"):
+        _line_done(body)
         return None   # Layer 7 is switched off: the copy is dropped unread (Layer 8 needs it, so it stops too)
     return lambda: reading_run(body)
+
+
+def _line_done(body):
+    """Nov 28 (Jordan: "Lets make this change"): tells a mood line waiting on this message (GET
+    /app/emotion/line?after=) that its read is over, so it goes out with Step 3's push in it. Never raises."""
+    try:
+        import rivia_line_wait as line_wait
+        line_wait.mark_done(body.get("message_id"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def reading_run(body):
@@ -201,6 +215,8 @@ def reading_run(body):
     except Exception as e:  # noqa: BLE001
         import sys
         print("rivia: Step 7 reading skipped a message (%s)" % type(e).__name__, file=sys.stderr)
+    finally:
+        _line_done(body)   # after the Flash read and Step 3's push, before Step 8 (the line needn't wait for it)
     try:
         import rivia_toggles as toggles
         if toggles.runs("l8"):
