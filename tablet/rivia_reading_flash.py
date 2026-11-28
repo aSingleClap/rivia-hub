@@ -29,6 +29,10 @@ import baseline
 import rivia_reading as reading
 
 MODEL = "gemini-3.8-flash"
+# Nov 28 (optional, with the mood line waiting for this read): "low" thinking instead of the model's default, so the
+# read usually lands inside the line's 3.5 s wait. On Nov 27 a read with default thinking took about 7 s. Step 2.6's
+# baseline profile already runs 3.8 Flash at "low". Put back "model_default" to undo.
+THINKING = "low"
 TEXT_MAX = 4000
 
 RATER = (
@@ -88,7 +92,7 @@ def body(text, model=MODEL, events=None):
             "store": False,
             "response_format": {"type": "text", "mime_type": "application/json",
                                 "schema": SCHEMA if events else SCHEMA_PLAIN},
-            "generation_config": {}}   # model default thinking, as the baseline rater
+            "generation_config": ({} if THINKING == "model_default" else {"thinking_level": THINKING})}
 
 
 def parse(text):

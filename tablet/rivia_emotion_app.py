@@ -6,6 +6,8 @@
 #   GET  /app/emotion/line   the injection line (Step 1.6, live since Nov 26) for the app to put in Gemini's
 #                       prompt: {"ok": true, "line": "mood: annoyance, intensity 2 of 4", "shadow": false}. "" when
 #                       she's neutral, Layer 1 is off, or anything fails. Each call logs one inject_log row.
+#                       ?after=<message_id> (Nov 28) first waits for the Flash read of that typed message, at most
+#                       rivia_line_wait.WAIT_S, and adds "read" (done, timeout, skipped) and "waited_ms".
 #
 # 2.4, what the dial moves: emotion freely; mood and baseline only while the lock is open (10 minutes
 # from an unlock press), and every mood or baseline change carries a tag, logged in change_log.tag and
@@ -267,7 +269,16 @@ async def line(request: Request):
     if request.method not in ("GET", "HEAD"):
         return _err(405, "method_not_allowed", "this is read-only; use GET")
     try:
-        return JSONResponse(line_reply())
+        after = request.query_params.get("after")
+        if after is None:
+            return JSONResponse(line_reply())
+        # Nov 28 (Jordan: "Lets make this change"): ?after=<message_id> waits for the Flash read of the message he
+        # just typed (Step 3's push included), at most rivia_line_wait.WAIT_S, then builds the line as it stands.
+        import rivia_line_wait as line_wait
+        read, waited_ms = await line_wait.wait_for(after)
+        reply = line_reply()
+        reply.update(read=read, waited_ms=waited_ms)
+        return JSONResponse(reply)
     except Exception as e:  # noqa: BLE001
         return _err(500, "internal", type(e).__name__)
 
